@@ -145,14 +145,14 @@ function getEncryptionKey(): Buffer {
   return crypto.createHash("sha256").update(raw, "utf8").digest();
 }
 
-function encrypt(value: string): string {
+export function encrypt(value: string): string {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", getEncryptionKey(), iv);
   const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   return [iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), ciphertext.toString("base64url")].join(".");
 }
 
-function decrypt(value: string): string {
+export function decrypt(value: string): string {
   const [ivText, tagText, ciphertextText] = value.split(".");
   if (!ivText || !tagText || !ciphertextText) throw new Error("账号凭据密文格式无效");
   const decipher = crypto.createDecipheriv("aes-256-gcm", getEncryptionKey(), Buffer.from(ivText, "base64url"));

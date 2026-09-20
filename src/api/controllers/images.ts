@@ -192,6 +192,8 @@ export async function generateImages(
     filePath,
     filePaths = [],
     n = 1,
+    onSubmitted,
+    beforeSubmit,
   }: {
     ratio?: string;
     resolution?: string;
@@ -200,14 +202,16 @@ export async function generateImages(
     filePath?: string; // 向后兼容的单张参考图路径
     filePaths?: string[]; // 参考图路径，支持本地/网络/base64
     n?: number; // 生成张数 (1-8)
+    onSubmitted?: (historyId: string) => void;
+    beforeSubmit?: () => void;
   },
   refreshToken: string
 ) {
-  const referenceImagePaths = [...new Set(
+  const orderedReferencePaths =
     [filePath, ...filePaths].filter(
       (value): value is string => typeof value === "string" && value.trim().length > 0
-    )
-  )];
+    );
+  const referenceImagePaths = onSubmitted ? orderedReferencePaths : [...new Set(orderedReferencePaths)];
   const hasReferenceImages = referenceImagePaths.length > 0;
   const uploadIDs: string[] = [];
 
@@ -241,6 +245,7 @@ export async function generateImages(
   let resolutionType = resolution.toLowerCase(); // 用户指定优先
 
   if (!modelConfig.supportedResolutions.includes(resolutionType)) {
+    if (onSubmitted) throw new Error("当前即梦模型不支持所选清晰度，未自动降级");
     resolutionType = modelConfig.defaultResolution;
     if (resolution !== resolutionType) {
       logger.warn(`⚠️ [分辨率] ${modelName} 不支持 ${resolution}，已自动调整为 ${resolutionType}`);
@@ -275,7 +280,7 @@ export async function generateImages(
   // 如果 prompt 里检测到且 ratio 是默认 "1:1" (可能是未传)，则覆盖。
   // 这里的风险是用户真的想 1:1 但 prompt 里有 "16:9"。
   // 鉴于这是一个 "Chat" driven API often，prompt detection is feature.
-  if (detectedRatioKey && validRatio === "1:1") {
+  if (!onSubmitted && detectedRatioKey && validRatio === "1:1") {
     validRatio = detectedRatioKey;
   }
 
@@ -478,8 +483,8 @@ export async function generateImages(
   };
   
   // 输出完整请求数据用于调试
-  logger.info(`📤 [请求数据] ${JSON.stringify(requestData)}`);
 
+  beforeSubmit?.();
   const { aigc_data } = await request(
     "post",
     "/mweb/v1/aigc_draft/generate",
@@ -496,6 +501,7 @@ export async function generateImages(
   const historyId = aigc_data.history_record_id;
   if (!historyId)
     throw new APIException(EX.API_IMAGE_GENERATION_FAILED, "记录ID不存在");
+  if (onSubmitted) { onSubmitted(String(historyId)); return []; }
 
   // 状态码说明：
   // 20 = 初始提交/队列中

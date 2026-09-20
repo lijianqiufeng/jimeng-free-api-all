@@ -10,7 +10,8 @@ const DB_PATH = process.env.DB_PATH || './data/jimeng.db';
 fs.ensureDirSync(path.dirname(DB_PATH));
 
 // 初始化数据库连接
-const db = new Database(DB_PATH);
+export const database = new Database(DB_PATH);
+const db = database;
 db.pragma('journal_mode = WAL');
 
 // 初始化表结构

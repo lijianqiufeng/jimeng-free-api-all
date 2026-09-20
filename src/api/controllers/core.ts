@@ -169,11 +169,11 @@ export async function request(
 
   logger.info(`发送请求: ${method.toUpperCase()} ${fullUrl}`);
   logger.info(`请求参数: ${JSON.stringify(requestParams)}`);
-  logger.info(`请求数据: ${JSON.stringify(options.data || {})}`);
 
   // 添加重试逻辑
   let retries = 0;
-  const maxRetries = 3; // 最大重试次数
+  // A timed-out paid POST may already have created a job. Never replay it.
+  const maxRetries = uri === "/mweb/v1/aigc_draft/generate" ? 0 : 3;
   let lastError = null;
 
   while (retries <= maxRetries) {
@@ -201,9 +201,6 @@ export async function request(
       if (options.responseType == "stream") return response;
 
       // 记录响应数据摘要
-      const responseDataSummary = JSON.stringify(response.data).substring(0, 500) +
-        (JSON.stringify(response.data).length > 500 ? "..." : "");
-      logger.info(`响应数据摘要: ${responseDataSummary}`);
 
       // 检查HTTP状态码
       if (response.status >= 400) {
@@ -218,7 +215,7 @@ export async function request(
     }
     catch (error) {
       lastError = error;
-      logger.error(`请求失败 (尝试 ${retries + 1}/${maxRetries + 1}): ${error.message}`);
+      logger.error(`请求失败 (尝试 ${retries + 1}/${maxRetries + 1})`);
 
       // 如果是网络错误或超时，尝试重试
       if ((error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT' ||
@@ -234,10 +231,9 @@ export async function request(
   }
 
   // 所有重试都失败了，抛出最后一个错误
-  logger.error(`请求失败，已重试 ${retries} 次: ${lastError.message}`);
+  logger.error(`请求失败，已重试 ${retries} 次`);
   if (lastError.response) {
     logger.error(`响应状态: ${lastError.response.status}`);
-    logger.error(`响应数据: ${JSON.stringify(lastError.response.data)}`);
   }
   throw lastError;
 }
@@ -389,7 +385,7 @@ export async function uploadFile(
   const UploadAddress = uploadImgRes.data.Result.UploadAddress;
   const uploadImgUrl = `https://${UploadAddress.UploadHosts[0]}/upload/v1/${UploadAddress.StoreInfos[0].StoreUri}`;
 
-  logger.info(`上传图片到: ${uploadImgUrl}`);
+  logger.info("上传图片到授权存储");
 
   // 上传图片
   const imageUploadRes = await axios.post(
@@ -451,7 +447,7 @@ export async function uploadFile(
   }
 
   const imageUri = commitImg.data.Result.Results[0].Uri;
-  logger.info(`文件上传成功，URI: ${imageUri}`);
+  logger.info("文件上传成功");
 
   return {
     image_uri: imageUri,
@@ -549,10 +545,10 @@ async function generateAWSAuthorizationHeader(
 export function checkResult(result: AxiosResponse) {
   const { ret, errmsg, data } = result.data;
   if (!_.isFinite(Number(ret))) return result.data;
-  if (ret === '0') return data;
+  if (Number(ret) === 0) return data;
   
   // 记录详细的API错误信息
-  logger.error(`❌ [API错误] 错误码: ${ret}, 错误消息: ${errmsg}`);
+  logger.error(`❌ [API错误] 错误码: ${Number(ret)}`);
   
   // 即梦积分不足错误码：5000 (旧) 或 1006 (新)
   if (ret === '5000' || ret === '1006')
