@@ -60,9 +60,14 @@ export function accountFailureCooldown(error: unknown): number | null {
   return null;
 }
 
-export function markCredentialFailure(credential: ResolvedCredential, error: unknown): boolean {
+export function markCredentialFailure(credential: ResolvedCredential, error?: unknown): boolean {
+  if (!credential.accountId) return false;
+  if (error === undefined) {
+    accountPool.markFailure(credential.accountId);
+    return true;
+  }
   const cooldownMs = accountFailureCooldown(error);
-  if (!credential.accountId || cooldownMs === null) return false;
+  if (cooldownMs === null) return false;
   accountPool.markFailure(credential.accountId, cooldownMs);
   return true;
 }

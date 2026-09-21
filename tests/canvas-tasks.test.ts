@@ -7,7 +7,7 @@ import accountPool from "@/lib/account-pool.ts";
 import { taskInput, taskResult } from "@/api/controllers/task-contract.ts";
 import { createTask, queryTask, cancelTask } from "@/api/controllers/tasks.ts";
 import { request } from "@/api/controllers/core.ts";
-import { resolveAuthorization } from "@/api/controllers/auth.ts";
+import { markCredentialFailure, resolveAuthorization } from "@/api/controllers/auth.ts";
 import accountRoutes from "@/api/routes/account-status.ts";
 
 globalThis.fetch = async () => { throw Error("unmocked network forbidden"); };
@@ -205,4 +205,22 @@ test("logout and key creation clear or overwrite both secret key inputs safely",
   assert.match(html, /handleLogout\(\).*\$\("upscale-api-key"\).*value\s*=\s*""/s);
   assert.match(html, /submitCreateApiKey\(\).*\$\("image-api-key"\).*value\s*=\s*data\.key/s);
   assert.match(html, /submitCreateApiKey\(\).*\$\("upscale-api-key"\).*value\s*=\s*data\.key/s);
+});
+test("HTTP 401 from request has no hung axios response", async () => {
+  submissionHttpStatus = 401;
+  try {
+    await request("post", "/mweb/v1/aigc_draft/generate", "fake-account-session", { data: {} });
+    assert.fail("request should reject HTTP 401");
+  } catch (error: any) {
+    assert.equal("response" in error, false);
+    assert.match(String(error?.message || ""), /HTTP 401/);
+  } finally {
+    submissionHttpStatus = 200;
+  }
+});
+test("markCredentialFailure without error cools the account", () => {
+  const account = accountPool.create({ name: "openapi cool account", sessionId: "openapi-cool-session" });
+  const cooled = markCredentialFailure({ token: "openapi-cool-session", accountId: account.id });
+  assert.equal(cooled, true);
+  assert.ok(Date.parse(accountPool.get(account.id).cooldownUntil || "") > Date.now());
 });
