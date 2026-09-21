@@ -15,7 +15,7 @@
 - CPA 原生 Agent 任务 API。
 - 单图 data URL 输入及严格类型、大小校验。
 - SQLite 持久化、幂等、取消和重启恢复。
-- 每任务固定一个账号及该账号自己的 Agent workspace/conversation。
+- 每任务固定一个账号、该账号自己的 Agent workspace，以及该任务独立的 conversation。
 - Agent 提交与原任务结果查询。
 - 管理台原图选择、任务恢复和前后对比滑杆。
 - 控制器、HTTP 路由和前端纯逻辑测试。
@@ -40,7 +40,7 @@
 /mweb/v1/creation_agent/v2/conversation
 ```
 
-请求需要账号自己的 workspace、conversation 和参考图 `item_id`/`uri`。这些标识不能从一次抓包中硬编码，也不能跨账号共享。
+请求需要账号自己的 workspace、任务独立的 conversation 和参考图 `uri`；引用既有生成资产时还携带 `item_id`。这些标识不能从一次抓包中硬编码，也不能跨账号共享。
 
 普通 `aigc_draft/generate` 的 `super_resolution` 可作为未来独立 4K 功能，但不能冒充本功能。浏览器自动化依赖页面和浏览器登录状态，不进入 NAS 服务。
 
@@ -123,7 +123,8 @@ Authorization: Bearer jm_...
 - `status`：`submitting`、`running`、`succeeded`、`failed`、`canceled`。
 - `account_id`：固定账号池账号。
 - `credential`：任务运行期间使用的加密 session；终态清空。
-- `workspace_id`、`conversation_id`：该账号的 Agent 上下文。
+- `workspace_id`：该账号的 Agent workspace。
+- `conversation_id`：当前任务独立生成的 Agent 会话 ID。
 - `reference_item_id`、`reference_uri`：上传后得到的参考图标识。
 - `provider_task_id`：上游任务/会话返回的稳定标识。
 - `provider_label`、`credits_used`：上游明确报告的结果信息。
@@ -133,10 +134,10 @@ Authorization: Bearer jm_...
 新增 `jimeng_agent_sessions`：
 
 - `account_id`：主键，与账号池账号一一对应。
-- `workspace_id`、`conversation_id`：该账号可复用的 Agent 上下文。
+- `workspace_id`：该账号可复用的 Agent workspace。
 - `updated_at`：最后确认时间。
 
-任务仍保存自己的 workspace/conversation 快照，避免缓存刷新改变已提交任务。
+任务保存自己的 workspace/conversation 快照；workspace 缓存刷新不能改变已提交任务，conversation 不在任务之间复用。
 
 ## 创建流程
 
@@ -144,8 +145,8 @@ Authorization: Bearer jm_...
 2. 规范化输入并计算指纹。
 3. 查询已有任务并执行幂等/冲突判断。
 4. 从账号池选择一个可用账号并预留 `submitting` 行。
-5. 使用同一账号上传参考图，获得 Agent 可用的 `item_id` 和 `uri`。
-6. 读取或初始化该账号自己的 workspace/conversation。
+5. 使用同一账号上传参考图，获得 Agent 可用的 `uri`、签名 URL 与宽高；已有生成资产可额外携带 `item_id`。
+6. 读取或初始化该账号自己的 workspace，并为当前任务生成独立 conversation ID。
 7. 最后检查任务仍为 `submitting` 且未过期。
 8. 仅发送一次 Agent 创建请求，固定提示词“帮我8k高清放大”与自动模式。
 9. 保存上游稳定标识并切换为 `running`。
@@ -165,7 +166,7 @@ Authorization: Bearer jm_...
 ## 账号与失败处理
 
 - 一个任务的上传、Agent 创建、结果查询必须始终使用同一账号。
-- workspace/conversation 只能属于对应账号，禁止跨账号复用。
+- workspace 只能属于对应账号；conversation 每任务独立，禁止跨账号或跨任务复用。
 - 4013 使用一小时基础冷却，并沿用账号池指数退避与随机抖动。
 - 1015、401、403 进入账号冷却并在管理台显示状态；不自动删除账号。
 - 只读状态查询成功不得清除生成任务建立的风控冷却。
