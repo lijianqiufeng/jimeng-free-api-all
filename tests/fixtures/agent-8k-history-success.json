@@ -1,0 +1,22 @@
+{
+  "history-test-001": {
+    "history_record_id": "history-test-001",
+    "status": 50,
+    "forecast_resolution": "8k",
+    "task": { "submit_id": "submit-test-001" },
+    "item_list": [
+      {
+        "image": {
+          "large_images": [
+            {
+              "image_uri": "uri-test-result-001",
+              "image_url": "https://fixture.invalid/result-8k.webp",
+              "width": 6144,
+              "height": 8192
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+event: system
+data: {"type":"conversation_created","conversation_id":"conv-server-test-001"}
+
+event: message
+data: {"author":{"role":"assistant"},"metadata":{"conversation_id":"conv-server-test-001","parent_message_id":"msg-user-test-001"},"status":"in_progress","id":"msg-assistant-test-001","content":{"content_type":"","content_parts":[{"generate_args":{"image_args":{"image_resolution_type":"8k"}}}]},"create_time":1700000000000,"tool_calls":[{"id":"call-sr-test-001","type":"server_function","streaming":true,"func":{"name":"creative_agent_mcp_gen_image_super_resolution_v3","arguments":"{}"}}]}
+
+event: message
+data: {"author":{"role":"tool"},"metadata":{"conversation_id":"conv-server-test-001","parent_message_id":"msg-assistant-test-001","tool_call_id":"call-sr-test-001"},"status":"in_progress","id":"msg-tool-result-test-001","content":{"content_type":"","content_parts":[{"text":"{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"data\\\":{\\\"submit_id\\\":\\\"submit-test-001\\\",\\\"result_code\\\":0,\\\"submit_info\\\":{\\\"code\\\":0},\\\"commerce_info\\\":{\\\"credit_count\\\":4,\\\"credit_display_info\\\":{\\\"actual_credits\\\":4,\\\"original_credits\\\":4,\\\"has_discount\\\":false,\\\"is_free\\\":false}}}}\"}]}"}]},"create_time":1700000001000}
+
+event: delta
+data: {"conversation_id":"conv-server-test-001","message_id":"msg-tool-result-test-001","path":"/messages/msg-tool-result-test-001/status","op":"replace","value":"finished_successfully"}
+
+event: system
+data: {"type":"stream_complete","conversation_id":"conv-server-test-001","request_message_id":"msg-user-test-001"}
+
