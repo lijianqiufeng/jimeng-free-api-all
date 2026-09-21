@@ -173,7 +173,11 @@ export async function request(
   // 添加重试逻辑
   let retries = 0;
   // A timed-out paid POST may already have created a job. Never replay it.
-  const maxRetries = uri === "/mweb/v1/aigc_draft/generate" ? 0 : 3;
+  const NON_RETRYABLE_PAID_POSTS = new Set([
+    "/mweb/v1/aigc_draft/generate",
+    "/mweb/v1/creation_agent/v2/conversation",
+  ]);
+  const maxRetries = NON_RETRYABLE_PAID_POSTS.has(uri) ? 0 : 3;
   let lastError = null;
 
   while (retries <= maxRetries) {
