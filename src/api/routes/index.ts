@@ -11,6 +11,7 @@ import dashboard from './dashboard.ts';
 import accountPool from './account-pool.ts';
 import accountStatus from './account-status.ts';
 import tasks from './tasks.ts';
+import upscaleTasks from './upscale-tasks.ts';
 
 export default [
     {
@@ -45,5 +46,6 @@ export default [
     dashboard,
     accountPool,
     accountStatus,
-    tasks
+    tasks,
+    upscaleTasks
 ];
