@@ -9,7 +9,7 @@ async function handle(request: Request, create: boolean) {
   if (!auth?.valid || !auth.apiKeyId) return new Response({ error: "API Key 无效" }, { statusCode: 401 });
   if (create) {
     try {
-      const result = await createTask(auth.apiKeyId, request.headers.authorization, request.body);
+      const result = await createTask(auth.apiKeyId, request.headers.authorization, request.body, request.headers["x-jimeng-account-id"]);
       return new Response(result.body, { statusCode: result.status });
     } catch {
       return new Response({ error: "即梦参数无效或暂无可用账号，请检查模型、比例、清晰度、时长及参考图" }, { statusCode: 400 });

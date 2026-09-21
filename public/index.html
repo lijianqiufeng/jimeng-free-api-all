@@ -139,6 +139,25 @@
       .account-table-panel { min-width: 0; }
       .account-table-panel .panel-head { padding-bottom: 16px; }
 
+      /* 生图测试 */
+      .image-test-layout { display: grid; grid-template-columns: minmax(320px, .82fr) minmax(0, 1.5fr); gap: 18px; align-items: start; }
+      .image-test-form .form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+      .api-key-row { display: flex; gap: 8px; }
+      .api-key-row input { flex: 1; min-width: 0; }
+      .api-key-row .btn { width: auto; flex: 0 0 auto; padding-inline: 13px; }
+      .test-help { margin: -7px 0 18px; color: var(--text-faint); font-size: 11px; line-height: 1.6; }
+      .test-help button { border: 0; padding: 0; color: var(--cyan); background: transparent; font-weight: 700; }
+      .request-preview { margin-top: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 11px; color: #aebddb; background: rgba(4, 8, 18, .44); font: 11px/1.65 Consolas, monospace; white-space: pre-wrap; word-break: break-all; }
+      .image-test-result { min-height: 470px; padding: 20px; }
+      .test-status { margin-bottom: 14px; color: var(--text-soft); font-size: 12px; }
+      .test-status.success { color: var(--green); }
+      .test-status.error { color: var(--red); }
+      .test-empty { min-height: 390px; display: grid; place-items: center; border: 1px dashed var(--line-strong); border-radius: 14px; color: var(--text-faint); text-align: center; line-height: 1.8; }
+      .image-result-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+      .image-result-card { overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--panel-muted); }
+      .image-result-card img { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: contain; background: #070b15; }
+      .image-result-card a { display: block; padding: 11px 13px; color: var(--cyan); text-decoration: none; font-size: 12px; font-weight: 700; }
+
       /* 其他页面 */
       .logs-toolbar, .media-filters { display: flex; gap: 9px; margin-bottom: 16px; flex-wrap: wrap; }
       .logs-toolbar select, .logs-toolbar .btn, .media-filters .btn { width: auto; min-width: 96px; padding: 9px 13px; }
@@ -167,8 +186,8 @@
       .toast { position: fixed; z-index: 40; right: 24px; bottom: 24px; max-width: 340px; padding: 12px 16px; border: 1px solid var(--line-strong); border-radius: 11px; color: white; background: #182743; box-shadow: var(--shadow); opacity: 0; transform: translateY(10px); pointer-events: none; transition: .22s; font-size: 13px; }
       .toast.show { opacity: 1; transform: translateY(0); }
 
-      @media (max-width: 960px) { .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .account-layout { grid-template-columns: 1fr; } }
-      @media (max-width: 640px) { .container { width: min(100% - 28px, 1440px); } .dashboard { padding-top: 18px; } .topbar { align-items: flex-start; flex-direction: column; } .header-actions { width: 100%; } .header-actions .btn { flex: 1; } .tabs-wrap { margin-bottom: 20px; } .stats-grid { gap: 10px; } .stat-card { min-height: 104px; padding: 15px; } .stat-value { font-size: 25px; } .panel-head, .panel-body { padding-left: 15px; padding-right: 15px; } .notice { margin-left: 15px; margin-right: 15px; } .section-heading { align-items: flex-start; flex-direction: column; } .auth-box { padding: 30px 24px; } }
+      @media (max-width: 960px) { .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .account-layout, .image-test-layout { grid-template-columns: 1fr; } }
+      @media (max-width: 640px) { .container { width: min(100% - 28px, 1440px); } .dashboard { padding-top: 18px; } .topbar { align-items: flex-start; flex-direction: column; } .header-actions { width: 100%; } .header-actions .btn { flex: 1; } .tabs-wrap { margin-bottom: 20px; } .stats-grid { gap: 10px; } .stat-card { min-height: 104px; padding: 15px; } .stat-value { font-size: 25px; } .panel-head, .panel-body { padding-left: 15px; padding-right: 15px; } .notice { margin-left: 15px; margin-right: 15px; } .section-heading { align-items: flex-start; flex-direction: column; } .auth-box { padding: 30px 24px; } .image-test-form .form-row { grid-template-columns: 1fr; } }
     </style>
   </head>
   <body>
@@ -206,6 +225,7 @@
       <nav class="tabs-wrap" aria-label="控制台导航">
         <button class="tab-btn active" data-tab="keys"><span class="tab-icon">钥</span>API 密钥</button>
         <button class="tab-btn" data-tab="accounts"><span class="tab-icon">号</span>即梦账号池</button>
+        <button class="tab-btn" data-tab="image-test"><span class="tab-icon">图</span>生图测试</button>
         <button class="tab-btn" data-tab="stats"><span class="tab-icon">览</span>运行概览</button>
         <button class="tab-btn" data-tab="logs"><span class="tab-icon">志</span>实时日志</button>
         <button class="tab-btn" data-tab="media"><span class="tab-icon">媒</span>媒体资源</button>
@@ -239,6 +259,33 @@
         </div>
       </section>
 
+      <section id="tab-image-test" class="tab-content">
+        <div class="section-heading"><div><h2>生图 API 测试</h2><p>使用本地 API Key 调用 <code>/v1/images/generations</code>，结果会直接显示在右侧。</p></div></div>
+        <div class="image-test-layout">
+          <div class="form-card image-test-form">
+            <h3>请求参数</h3>
+            <p>API Key 会通过 <code>Authorization: Bearer jm_...</code> 发送，仅保存在当前浏览器会话。</p>
+            <div class="form-group"><label for="image-api-key">API Key</label><div class="api-key-row"><input id="image-api-key" type="password" autocomplete="off" placeholder="jm_..." /><button class="btn btn-secondary" type="button" onclick="toggleTestKey()">显示</button></div></div>
+            <div class="test-help">还没有 Key？<button type="button" onclick="activateTab('keys'); openKeyModal();">去创建一个测试 Key</button>；创建后会自动填入本页。</div>
+            <div class="form-group"><label for="image-prompt">提示词</label><textarea id="image-prompt" rows="5" placeholder="例如：一只在月球上喝咖啡的猫，电影感，柔和光影">一只在月球上喝咖啡的猫，电影感，柔和光影</textarea></div>
+            <div class="form-group"><label for="image-model">模型</label><select id="image-model"><option value="jimeng-image-5.0-lite">即梦图片 5.0 Lite</option><option value="jimeng-image-4.7">即梦图片 4.7</option><option value="jimeng-image-4.6">即梦图片 4.6</option><option value="jimeng-image-4.5">即梦图片 4.5</option><option value="jimeng-image-4.1">即梦图片 4.1</option></select></div>
+            <div class="form-row">
+              <div class="form-group"><label for="image-ratio">比例</label><select id="image-ratio"><option>1:1</option><option>16:9</option><option>9:16</option><option>4:3</option><option>3:4</option><option>3:2</option><option>2:3</option><option>21:9</option></select></div>
+              <div class="form-group"><label for="image-resolution">分辨率</label><select id="image-resolution"><option value="2k">2K</option><option value="1k">1K</option><option value="4k">4K</option></select></div>
+            </div>
+            <div class="form-group"><label for="image-count">生成张数</label><select id="image-count"><option value="1">1 张</option><option value="2">2 张</option><option value="4">4 张</option></select></div>
+            <button id="image-test-submit" class="btn btn-primary btn-full" type="button" onclick="runImageTest()">开始生图</button>
+            <div class="request-preview">POST /v1/images/generations
+Authorization: Bearer jm_xxx
+Content-Type: application/json</div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><div><h3>生成结果</h3><p>图片生成通常需要几十秒，请不要重复提交。</p></div></div>
+            <div class="image-test-result"><div id="image-test-status" class="test-status"></div><div id="image-test-output" class="test-empty">填写参数并点击“开始生图”<br />这里会显示 API 返回的图片</div></div>
+          </div>
+        </div>
+      </section>
+
       <section id="tab-stats" class="tab-content"><div class="section-heading"><div><h2>运行概览</h2><p>查看服务调用量与模型使用情况。</p></div><button class="btn btn-secondary" onclick="loadStats()">刷新数据</button></div><div class="stats-grid"><div class="stat-card"><div class="stat-label">总调用次数</div><div id="total-calls" class="stat-value accent">0</div></div><div class="stat-card"><div class="stat-label">消耗积分</div><div id="total-credits" class="stat-value">0</div></div><div class="stat-card"><div class="stat-label">启用中的密钥</div><div id="active-keys" class="stat-value green">0</div></div><div class="stat-card"><div class="stat-label">使用过的模型</div><div id="models-used" class="stat-value">0</div></div></div><div class="panel" style="margin-bottom:18px"><div class="panel-head"><h3>API 密钥调用统计</h3></div><div class="table-scroll"><table><thead><tr><th>密钥</th><th>调用次数</th><th>消耗积分</th><th>剩余积分</th><th>最近使用</th></tr></thead><tbody id="key-stats-table"></tbody></table></div></div><div class="panel"><div class="panel-head"><h3>模型使用统计</h3></div><div class="table-scroll"><table><thead><tr><th>模型</th><th>调用次数</th><th>消耗积分</th></tr></thead><tbody id="model-stats-table"></tbody></table></div></div></section>
 
       <section id="tab-logs" class="tab-content"><div class="section-heading"><div><h2>实时日志</h2><p>按级别查看服务运行记录。</p></div><div class="logs-toolbar"><select id="log-level" onchange="loadLogs()"><option value="ALL">全部级别</option><option value="INFO">信息</option><option value="WARN">警告</option><option value="ERROR">错误</option></select><button class="btn btn-secondary" onclick="loadLogs()">刷新</button><button class="btn btn-danger" onclick="clearLogs()">清理日志</button><button class="btn btn-secondary" onclick="exportLogs()">导出日志</button></div></div><div class="log-container" id="log-container"><div class="loading">正在加载…</div></div></section>
@@ -265,13 +312,13 @@
       async function handleLogout() { await fetch("/dashboard/logout", { method: "POST", credentials: "include" }); location.reload(); }
       function showDashboard() { $("auth-page").style.display = "none"; $("dashboard").classList.add("active"); activateTab("keys"); startAutoRefresh(); }
       function startAutoRefresh() { clearInterval(autoRefreshInterval); autoRefreshInterval = setInterval(() => { const active = document.querySelector(".tab-btn.active")?.dataset.tab; if (active === "stats") loadStats(); if (active === "keys") loadManagedKeys(); if (active === "accounts") loadAccounts(); }, 15000); }
-      function activateTab(name) { document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === name)); document.querySelectorAll(".tab-content").forEach((c) => c.classList.toggle("active", c.id === "tab-" + name)); if (name === "keys") loadManagedKeys(); else if (name === "accounts") loadAccounts(); else if (name === "stats") loadStats(); else if (name === "logs") loadLogs(); else if (name === "media") loadMedia(); }
+      function activateTab(name) { document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === name)); document.querySelectorAll(".tab-content").forEach((c) => c.classList.toggle("active", c.id === "tab-" + name)); if (name === "keys") loadManagedKeys(); else if (name === "accounts") loadAccounts(); else if (name === "image-test") loadTestKey(); else if (name === "stats") loadStats(); else if (name === "logs") loadLogs(); else if (name === "media") loadMedia(); }
       document.querySelectorAll(".tab-btn").forEach((btn) => btn.addEventListener("click", () => activateTab(btn.dataset.tab)));
 
       async function loadManagedKeys() { try { const res = await fetch("/dashboard/keys", { credentials: "include" }); if (!res.ok) return; const keys = await res.json(); const active = keys.filter((k) => k.enabled).length; $("key-total").textContent = keys.length; $("key-active").textContent = active; $("key-disabled").textContent = keys.length - active; $("managed-keys-table").innerHTML = keys.map((k) => `<tr><td><strong>${esc(k.name || "未命名密钥")}</strong></td><td><code>${esc(k.key_preview)}</code></td><td>${badge(k.enabled)}</td><td>${dateText(k.created_at)}</td><td>${dateText(k.last_used)}</td><td><div class="row-actions"><button class="btn btn-secondary" onclick="setManagedKeyStatus(${k.id}, ${!k.enabled})">${k.enabled ? "停用" : "启用"}</button><button class="btn btn-danger" onclick="deleteManagedKey(${k.id})">撤销</button></div></td></tr>`).join("") || emptyRow(6, "还没有 API 密钥，点击右上角创建第一个"); } catch (e) { console.error(e); } }
       function openKeyModal() { $("key-modal").classList.add("active"); $("key-name").focus(); $("new-key-box").classList.add("hidden"); }
       function closeKeyModal() { $("key-modal").classList.remove("active"); $("key-name").value = ""; }
-      async function submitCreateApiKey() { const name = $("key-name").value.trim(); const res = await fetch("/dashboard/keys", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }); const data = await res.json(); if (!res.ok) return showToast(data.error || "创建失败"); $("new-api-key").textContent = data.key; $("new-key-box").classList.remove("hidden"); $("key-name").value = ""; loadManagedKeys(); showToast("密钥创建成功"); }
+      async function submitCreateApiKey() { const name = $("key-name").value.trim(); const res = await fetch("/dashboard/keys", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }); const data = await res.json(); if (!res.ok) return showToast(data.error || "创建失败"); $("new-api-key").textContent = data.key; $("new-key-box").classList.remove("hidden"); $("key-name").value = ""; sessionStorage.setItem("jimengTestApiKey", data.key); loadManagedKeys(); showToast("密钥创建成功，已填入生图测试页"); }
       async function copyNewApiKey() { await navigator.clipboard.writeText($("new-api-key").textContent); showToast("密钥已复制"); }
       async function setManagedKeyStatus(id, enabled) { const res = await fetch(`/dashboard/keys/${id}/status`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) }); if (res.ok) { loadManagedKeys(); showToast(enabled ? "密钥已启用" : "密钥已停用"); } }
       async function deleteManagedKey(id) { if (!confirm("确定撤销这个 API 密钥吗？撤销后无法恢复。")) return; const res = await fetch(`/dashboard/keys/${id}`, { method: "DELETE", credentials: "include" }); if (res.ok) { loadManagedKeys(); showToast("密钥已撤销"); } }
@@ -284,6 +331,29 @@
       async function setAccountStatus(id, enabled) { const res = await fetch(`/account-pool/${id}/enabled`, { method: "PATCH", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) }); if (res.ok) { loadAccounts(); showToast(enabled ? "账号已启用" : "账号已停用"); } }
       async function refreshAccount(id) { const res = await fetch(`/account-pool/${id}/refresh-status`, { method: "POST", credentials: "include" }); const data = await res.json(); if (!res.ok || isApiFailure(data)) showToast(apiError(data, "状态查询失败")); else showToast("账号状态已更新"); loadAccounts(); }
       async function deleteAccount(id) { if (!confirm("确定从账号池删除这个账号吗？")) return; const res = await fetch(`/account-pool/${id}`, { method: "DELETE", credentials: "include" }); if (res.ok) { loadAccounts(); showToast("账号已删除"); } }
+
+      function loadTestKey() { const saved = sessionStorage.getItem("jimengTestApiKey"); if (saved && !$("image-api-key").value) $("image-api-key").value = saved; }
+      function toggleTestKey() { const input = $("image-api-key"); input.type = input.type === "password" ? "text" : "password"; input.nextElementSibling.textContent = input.type === "password" ? "显示" : "隐藏"; }
+      async function runImageTest() {
+        const apiKey = $("image-api-key").value.trim(), prompt = $("image-prompt").value.trim();
+        if (!apiKey) return showToast("请先填写 API Key");
+        if (!prompt) return showToast("请填写提示词");
+        sessionStorage.setItem("jimengTestApiKey", apiKey);
+        const button = $("image-test-submit"), status = $("image-test-status"), output = $("image-test-output");
+        button.disabled = true; button.textContent = "生成中…"; status.className = "test-status"; status.textContent = "请求已提交，正在等待即梦返回图片…"; output.className = "test-empty"; output.innerHTML = "生成中，请耐心等待<br />请勿关闭当前页面";
+        try {
+          const payload = { model: $("image-model").value, prompt, ratio: $("image-ratio").value, resolution: $("image-resolution").value, n: Number($("image-count").value), response_format: "url" };
+          const res = await fetch("/v1/images/generations", { method: "POST", headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+          const data = await res.json();
+          if (!res.ok || isApiFailure(data)) throw new Error(apiError(data, `请求失败（HTTP ${res.status}）`));
+          const images = Array.isArray(data.data) ? data.data.map((item) => item?.url).filter((url) => typeof url === "string" && /^https?:\/\//i.test(url)) : [];
+          if (!images.length) throw new Error("接口未返回可显示的图片 URL");
+          output.className = "image-result-grid"; output.innerHTML = images.map((url, index) => `<div class="image-result-card"><img src="${esc(url)}" alt="生成图片 ${index + 1}" /><a href="${esc(url)}" target="_blank" rel="noopener">查看原图 ↗</a></div>`).join("");
+          status.className = "test-status success"; status.textContent = `生成成功：${images.length} 张图片`;
+        } catch (error) {
+          output.className = "test-empty"; output.textContent = error.message || "生图失败，请查看实时日志"; status.className = "test-status error"; status.textContent = "请求失败";
+        } finally { button.disabled = false; button.textContent = "开始生图"; }
+      }
 
       async function loadStats() { try { const res = await fetch("/dashboard/stats", { credentials: "include" }); if (!res.ok) return; const data = await res.json(); $("total-calls").textContent = data.totals?.total_calls || 0; $("total-credits").textContent = data.totals?.total_credits || 0; $("active-keys").textContent = data.keyStats?.length || 0; $("models-used").textContent = data.modelStats?.length || 0; $("key-stats-table").innerHTML = data.keyStats?.map((k) => `<tr><td><code>${esc(k.key_preview)}</code></td><td>${esc(k.total_calls)}</td><td>${esc(k.total_credits)}</td><td>${esc(k.remaining_credits || 0)}</td><td>${dateText(k.last_used)}</td></tr>`).join("") || emptyRow(5); $("model-stats-table").innerHTML = data.modelStats?.map((m) => `<tr><td>${esc(m.model)}</td><td>${esc(m.total_calls)}</td><td>${esc(m.total_credits)}</td></tr>`).join("") || emptyRow(3); } catch (e) { console.error(e); } }
       async function loadLogs() { try { const level = $("log-level").value, res = await fetch(`/dashboard/logs?level=${level}&limit=200`, { credentials: "include" }); if (!res.ok) return; const logs = await res.json(); $("log-container").innerHTML = logs.map((log) => `<div class="log-entry"><span class="log-time">${esc(log.created_at)}</span><span class="log-level ${esc(log.level)}">${esc(log.level)}</span><span class="log-message">${esc(log.message)}</span></div>`).join("") || `<div class="loading">暂无日志</div>`; } catch (e) { console.error(e); } }

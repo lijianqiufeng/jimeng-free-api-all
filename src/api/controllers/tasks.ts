@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { database } from "@/lib/database.ts";
-import { encrypt, decrypt } from "@/lib/account-pool.ts";
+import { encrypt, decrypt, markFailure } from "@/lib/account-pool.ts";
 import { resolveAuthorization } from "./auth.ts";
 import { generateImages } from "./images.ts";
 import { request } from "./core.ts";
@@ -19,7 +19,7 @@ const polling = new Map<string, Promise<void>>();
 const get = (id: string) => database.prepare("SELECT * FROM canvas_tasks WHERE id = ?").get(id) as Task | undefined;
 const publicTask = (task: Task) => ({ id: task.id, status: task.status === "submitting" ? "running" : task.status, model: task.model, ...(task.result ? { data: JSON.parse(task.result) } : {}), ...(task.error ? { error: task.error } : {}) });
 
-export async function createTask(owner: number, authorization: string, body: unknown) {
+export async function createTask(owner: number, authorization: string, body: unknown, requestedAccountId?: string) {
   const input = taskInput(body);
   const fingerprint = crypto.createHash("sha256").update(JSON.stringify(input)).digest("hex");
   const previous = get(input.id);
@@ -27,10 +27,10 @@ export async function createTask(owner: number, authorization: string, body: unk
     if (previous.owner !== owner || previous.fingerprint !== fingerprint) return { status: 409, body: { error: "任务 ID 已使用，不能替换参数或归属" } };
     return { status: 200, body: publicTask(previous) };
   }
-  const credential = await resolveAuthorization(authorization);
+  const credential = await resolveAuthorization(authorization, requestedAccountId);
   // resolveAuthorization yields: recheck for concurrent requests before inserting.
   const reserved = database.prepare("INSERT OR IGNORE INTO canvas_tasks (id, owner, kind, model, fingerprint, status, credential, deadline) VALUES (?, ?, ?, ?, ?, 'submitting', ?, ?)").run(input.id, owner, input.kind, input.model, fingerprint, encrypt(credential.token), Date.now() + (input.kind === "image" ? 60 : 30) * 60_000);
-  if (!reserved.changes) return createTask(owner, authorization, body);
+  if (!reserved.changes) return createTask(owner, authorization, body, requestedAccountId);
   const onSubmitted = (historyId: string) => {
     database.prepare("UPDATE canvas_tasks SET history_id = ?, status = 'running' WHERE id = ? AND status = 'submitting'").run(historyId, input.id);
   };
@@ -38,6 +38,7 @@ export async function createTask(owner: number, authorization: string, body: unk
   void generateImages(input.model, input.prompt, { ratio: input.ratio, resolution: input.resolution, filePaths: input.images, n: 1, onSubmitted, beforeSubmit }, credential.token).catch((error) => {
     // Never return raw upstream errors, request configs, cookies or asset URLs.
     const message = String(error?.message || "");
+    if (credential.accountId) markFailure(credential.accountId, /4013/.test(message) ? 60 * 60_000 : 30_000);
     const known = /\(错误码: 4013\)$/.test(message)
       ? "即梦安全风控拒绝了本次请求（4013：疑似存在异常行为）；未自动重提，请前往即梦网页检查账号安全验证或联系即梦支持"
       : message.match(/当前即梦模型不支持所选(?:清晰度|时长)，未自动(?:降级|缩短)|^首帧上传失败$|^尾帧上传失败，未提交生成$/)?.[0];

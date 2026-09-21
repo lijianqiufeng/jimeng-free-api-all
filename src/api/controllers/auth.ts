@@ -15,14 +15,14 @@ export function isManagedApiKey(value: string): boolean {
   return /^jm_[A-Za-z0-9_-]{20,}$/.test(value);
 }
 
-export async function resolveAuthorization(authorization: string): Promise<ResolvedCredential> {
+export async function resolveAuthorization(authorization: string, requestedAccountId?: string): Promise<ResolvedCredential> {
   const tokens = tokenSplit(authorization);
   if (tokens.length === 0) throw new Error("Authorization token is empty");
 
   const managedKey = tokens.find((token) => db.validateApiKey(token).valid);
   const looksLikeManagedKey = tokens.find(isManagedApiKey);
   if (managedKey) {
-    const selected = accountPool.select("round_robin");
+    const selected = requestedAccountId ? accountPool.selectById(requestedAccountId) : accountPool.select("round_robin");
     touchApiKey(managedKey);
     return {
       token: selected.sessionId,

@@ -203,7 +203,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_${TABLE}_eligible ON ${TABLE}(enabled, cooldown_until, failure_count);
 `);
 
-let roundRobinCursor = 0;
 let membershipStatusProvider: MembershipStatusProvider | undefined;
 
 function toPublic(row: AccountRow): PublicAccount {
@@ -308,10 +307,22 @@ export function setAccountEnabled(id: string, enabled: boolean): PublicAccount {
 }
 
 export function selectAccount(strategy: AccountSelectionStrategy = "least_failures"): AccountSelection {
-  const rows = db.prepare(`SELECT * FROM ${TABLE} WHERE enabled = 1 AND (cooldown_until IS NULL OR cooldown_until <= ?) ORDER BY failure_count ASC, last_used_at ASC`).all(now()) as AccountRow[];
+  const order = strategy === "round_robin" ? "last_used_at ASC, created_at ASC, id ASC" : "failure_count ASC, last_used_at ASC, id ASC";
+  const rows = db.prepare(`SELECT * FROM ${TABLE} WHERE enabled = 1 AND (cooldown_until IS NULL OR cooldown_until <= ?) ORDER BY ${order}`).all(now()) as AccountRow[];
   if (!rows.length) throw new Error("没有可用的即梦账号");
-  const row = strategy === "round_robin" ? rows[roundRobinCursor++ % rows.length] : rows[0];
+  const row = rows[0];
   db.prepare(`UPDATE ${TABLE} SET last_used_at = ?, updated_at = ? WHERE id = ?`).run(now(), now(), row.id);
+  const credential = decrypt(row.credential_ciphertext);
+  return { account: getAccount(row.id), credential, sessionId: extractSessionId(credential, row.credential_kind) };
+}
+
+/** Select one specific enabled account for an already-bound task or status check. */
+export function selectAccountById(id: string): AccountSelection {
+  const row = db.prepare(`SELECT * FROM ${TABLE} WHERE id = ? AND enabled = 1 AND (cooldown_until IS NULL OR cooldown_until <= ?)`)
+    .get(id, now()) as AccountRow | undefined;
+  if (!row) throw new Error("指定的即梦账号不可用");
+  const timestamp = now();
+  db.prepare(`UPDATE ${TABLE} SET last_used_at = ?, updated_at = ? WHERE id = ?`).run(timestamp, timestamp, row.id);
   const credential = decrypt(row.credential_ciphertext);
   return { account: getAccount(row.id), credential, sessionId: extractSessionId(credential, row.credential_kind) };
 }
@@ -323,8 +334,9 @@ export function markSuccess(id: string): PublicAccount {
 }
 
 export function markFailure(id: string, cooldownMs = 30_000): PublicAccount {
-  getRow(id);
-  const cooldownUntil = new Date(Date.now() + Math.max(0, cooldownMs)).toISOString();
+  const row = getRow(id);
+  const delay = Math.min(24 * 60 * 60_000, Math.max(0, cooldownMs) * 2 ** Math.min(row.failure_count, 5));
+  const cooldownUntil = new Date(Math.max(Date.parse(row.cooldown_until || "") || 0, Date.now() + delay + Math.random() * delay * 0.1)).toISOString();
   db.prepare(`UPDATE ${TABLE} SET failure_count = failure_count + 1, cooldown_until = ?, last_failure_at = ?, updated_at = ? WHERE id = ?`).run(cooldownUntil, now(), now(), id);
   return getAccount(id);
 }
@@ -355,6 +367,7 @@ export const update = updateAccount;
 export const remove = deleteAccount;
 export { deleteAccount as delete };
 export const select = selectAccount;
+export const selectById = selectAccountById;
 
 export const accountPool = {
   list: listAccounts,
@@ -364,6 +377,7 @@ export const accountPool = {
   delete: deleteAccount,
   setEnabled: setAccountEnabled,
   select: selectAccount,
+  selectById: selectAccountById,
   markSuccess,
   markFailure,
   refreshStatus,

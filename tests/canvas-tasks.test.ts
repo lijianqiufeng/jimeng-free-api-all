@@ -6,6 +6,7 @@ import accountPool from "@/lib/account-pool.ts";
 import { taskInput, taskResult } from "@/api/controllers/task-contract.ts";
 import { createTask, queryTask, cancelTask } from "@/api/controllers/tasks.ts";
 import { request } from "@/api/controllers/core.ts";
+import { resolveAuthorization } from "@/api/controllers/auth.ts";
 
 globalThis.fetch = async () => { throw Error("unmocked network forbidden"); };
 let submissions = 0, timeoutSubmission = false, submissionRet = "0";
@@ -36,6 +37,7 @@ const managed = createApiKey("isolated canvas");
 const owner = validateApiKey(managed.key).apiKeyId!;
 accountPool.create({ name: "isolated account", sessionId: "fake-account-session" });
 const authorization = `Bearer ${managed.key}`;
+const boundAccount = accountPool.create({ name: "bound account", sessionId: "bound-account-session" });
 const input = { id: "canvas_test_1234567890", model: "jimeng-image-5.0-lite", prompt: "test 16:9 but request 1:1", ratio: "1:1", resolution: "2k", images: [] };
 async function until(predicate: () => boolean) { const end = Date.now() + 2000; while (!predicate() && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 5)); assert.ok(predicate()); }
 
@@ -51,6 +53,11 @@ test("ID-keyed image history resolves only the requested task and recognizes fai
   assert.equal(taskResult(history, "a", "image").status, "succeeded");
   assert.equal(taskResult(history, "b", "image").status, "running");
   assert.equal(taskResult({ a: { status: 30, fail_code: "2038", item_list: [] } }, "a", "image").status, "failed");
+});
+test("managed keys honor an explicit account binding for status and task preparation", async () => {
+  const credential = await resolveAuthorization(authorization, boundAccount.id);
+  assert.equal(credential.accountId, boundAccount.id);
+  assert.equal(credential.token, "bound-account-session");
 });
 test("duplicate POST never creates another paid task; poll retains private credential", async () => {
   const first = await createTask(owner, authorization, input);
