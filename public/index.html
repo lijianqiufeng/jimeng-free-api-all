@@ -480,13 +480,17 @@ Content-Type: application/json</div>
       }
       async function pollUpscale(id) {
         stopUpscalePoll();
-        lockUpscaleButton();
         const apiKey = upscaleApiKey();
-        if (!apiKey) { setUpscaleStatus("", "请填写 API Key 以继续查询已有任务，不会重新提交"); return; }
         try {
           const blob = await JimengUpscaleUI.getOriginal(id);
           if (blob) { upscaleSelectedFile = blob; setUpscaleOriginal(blob); }
         } catch (e) { console.error(e); }
+        if (!apiKey) {
+          setUpscaleStatus("", "请填写 API Key 以继续查询已有任务，不会重新提交");
+          unlockUpscaleButton();
+          return;
+        }
+        lockUpscaleButton();
         const tick = async () => {
           try {
             const res = await fetch("/v1/upscale/tasks/" + encodeURIComponent(id), { headers: { Authorization: "Bearer " + apiKey } });
@@ -524,16 +528,22 @@ Content-Type: application/json</div>
           try {
             const res = await fetch("/v1/upscale/tasks/" + encodeURIComponent(existing), { headers: { Authorization: "Bearer " + apiKey } });
             const data = await res.json().catch(() => ({}));
-            if (res.status === 404) sessionStorage.removeItem(UPSCALE_TASK_KEY);
-            else if (!res.ok || !JimengUpscaleUI.isTerminalStatus(data.status)) {
+            if (res.ok && !JimengUpscaleUI.isTerminalStatus(data.status)) {
               lockUpscaleButton();
               await pollUpscale(existing);
               return;
             }
+            if (res.status === 404) sessionStorage.removeItem(UPSCALE_TASK_KEY);
+            else if (res.status === 401 || res.status === 403) {
+              setUpscaleStatus("error", apiError(data, "API Key 无效"));
+              unlockUpscaleButton();
+            } else if (!res.ok) {
+              setUpscaleStatus("", "无法确认旧任务");
+              unlockUpscaleButton();
+            }
           } catch (error) {
-            lockUpscaleButton();
-            await pollUpscale(existing);
-            return;
+            setUpscaleStatus("", "无法确认旧任务");
+            unlockUpscaleButton();
           }
         }
         const file = upscaleSelectedFile || ($("upscale-file") && $("upscale-file").files && $("upscale-file").files[0]);
