@@ -87,6 +87,7 @@ interface AccountRow {
   metadata_json: string;
   created_at: string;
   updated_at: string;
+  selection_seq: number;
 }
 
 export class AccountPoolConfigurationError extends Error {
@@ -198,10 +199,20 @@ db.exec(`
     status_error TEXT,
     metadata_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    selection_seq INTEGER NOT NULL DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS idx_${TABLE}_eligible ON ${TABLE}(enabled, cooldown_until, failure_count);
+  CREATE TABLE IF NOT EXISTS jimeng_account_leases (
+    api_key_id INTEGER NOT NULL,
+    account_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (api_key_id, account_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_jimeng_account_leases_expiry ON jimeng_account_leases(expires_at);
 `);
+const accountColumns = new Set((db.prepare(`PRAGMA table_info(${TABLE})`).all() as Array<{ name: string }>).map((column) => column.name));
+if (!accountColumns.has("selection_seq")) db.exec(`ALTER TABLE ${TABLE} ADD COLUMN selection_seq INTEGER NOT NULL DEFAULT 0`);
 
 let membershipStatusProvider: MembershipStatusProvider | undefined;
 
@@ -307,11 +318,21 @@ export function setAccountEnabled(id: string, enabled: boolean): PublicAccount {
 }
 
 export function selectAccount(strategy: AccountSelectionStrategy = "least_failures"): AccountSelection {
-  const order = strategy === "round_robin" ? "last_used_at ASC, created_at ASC, id ASC" : "failure_count ASC, last_used_at ASC, id ASC";
-  const rows = db.prepare(`SELECT * FROM ${TABLE} WHERE enabled = 1 AND (cooldown_until IS NULL OR cooldown_until <= ?) ORDER BY ${order}`).all(now()) as AccountRow[];
-  if (!rows.length) throw new Error("没有可用的即梦账号");
-  const row = rows[0];
-  db.prepare(`UPDATE ${TABLE} SET last_used_at = ?, updated_at = ? WHERE id = ?`).run(now(), now(), row.id);
+  const reserve = db.transaction(() => {
+    const timestamp = now();
+    const order = strategy === "round_robin"
+      ? "selection_seq ASC, id ASC"
+      : "failure_count ASC, selection_seq ASC, id ASC";
+    const row = db.prepare(`SELECT * FROM ${TABLE} WHERE enabled = 1 AND (cooldown_until IS NULL OR cooldown_until <= ?) ORDER BY ${order} LIMIT 1`)
+      .get(timestamp) as AccountRow | undefined;
+    if (!row) throw new Error("没有可用的即梦账号");
+    const sequence = (db.prepare(`SELECT COALESCE(MAX(selection_seq), 0) + 1 AS value FROM ${TABLE}`).get() as { value: number }).value;
+    db.prepare(`UPDATE ${TABLE} SET selection_seq = ?, last_used_at = ?, updated_at = ? WHERE id = ?`).run(sequence, timestamp, timestamp, row.id);
+    return row;
+  });
+  // IMMEDIATE obtains the SQLite write reservation before reading the candidate.
+  // SQLITE_BUSY is intentionally propagated so another process cannot silently reuse the same row.
+  const row = reserve.immediate();
   const credential = decrypt(row.credential_ciphertext);
   return { account: getAccount(row.id), credential, sessionId: extractSessionId(credential, row.credential_kind) };
 }
@@ -327,9 +348,32 @@ export function selectAccountById(id: string): AccountSelection {
   return { account: getAccount(row.id), credential, sessionId: extractSessionId(credential, row.credential_kind) };
 }
 
+export function grantAccountLease(apiKeyId: number, accountId: string, ttlMs = 5 * 60_000): void {
+  getRow(accountId);
+  const expiresAt = Date.now() + Math.max(1, ttlMs);
+  db.prepare(`
+    INSERT INTO jimeng_account_leases (api_key_id, account_id, expires_at) VALUES (?, ?, ?)
+    ON CONFLICT(api_key_id, account_id) DO UPDATE SET expires_at = excluded.expires_at
+  `).run(apiKeyId, accountId, expiresAt);
+}
+
+export function hasAccountLease(apiKeyId: number, accountId: string): boolean {
+  const row = db.prepare("SELECT expires_at FROM jimeng_account_leases WHERE api_key_id = ? AND account_id = ?")
+    .get(apiKeyId, accountId) as { expires_at: number } | undefined;
+  return Boolean(row && row.expires_at > Date.now());
+}
+
 export function markSuccess(id: string): PublicAccount {
   getRow(id);
-  db.prepare(`UPDATE ${TABLE} SET success_count = success_count + 1, failure_count = 0, cooldown_until = NULL, last_success_at = ?, updated_at = ? WHERE id = ?`).run(now(), now(), id);
+  const timestamp = now();
+  db.prepare(`
+    UPDATE ${TABLE}
+    SET success_count = success_count + 1,
+        failure_count = CASE WHEN cooldown_until IS NULL OR cooldown_until <= ? THEN 0 ELSE failure_count END,
+        cooldown_until = CASE WHEN cooldown_until IS NULL OR cooldown_until <= ? THEN NULL ELSE cooldown_until END,
+        last_success_at = ?, updated_at = ?
+    WHERE id = ?
+  `).run(timestamp, timestamp, timestamp, timestamp, id);
   return getAccount(id);
 }
 
@@ -368,6 +412,8 @@ export const remove = deleteAccount;
 export { deleteAccount as delete };
 export const select = selectAccount;
 export const selectById = selectAccountById;
+export const grantLease = grantAccountLease;
+export const hasLease = hasAccountLease;
 
 export const accountPool = {
   list: listAccounts,
@@ -378,6 +424,8 @@ export const accountPool = {
   setEnabled: setAccountEnabled,
   select: selectAccount,
   selectById: selectAccountById,
+  grantLease: grantAccountLease,
+  hasLease: hasAccountLease,
   markSuccess,
   markFailure,
   refreshStatus,

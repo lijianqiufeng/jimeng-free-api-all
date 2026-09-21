@@ -1,18 +1,21 @@
 import crypto from "node:crypto";
 import { database } from "@/lib/database.ts";
-import { encrypt, decrypt, markFailure } from "@/lib/account-pool.ts";
-import { resolveAuthorization } from "./auth.ts";
+import { encrypt, decrypt, markFailure, markSuccess } from "@/lib/account-pool.ts";
+import { accountFailureCooldown, resolveAuthorization } from "./auth.ts";
 import { generateImages } from "./images.ts";
 import { request } from "./core.ts";
 import { taskInput, taskResult } from "./task-contract.ts";
 
-type Task = { id: string; owner: number; kind: "image" | "video"; model: string; fingerprint: string; status: string; credential: string; history_id: string; result: string; error: string; deadline: number; checked_at: number };
+type Task = { id: string; owner: number; kind: "image" | "video"; model: string; fingerprint: string; status: string; credential: string; account_id: string; history_id: string; result: string; error: string; deadline: number; checked_at: number };
 database.exec(`CREATE TABLE IF NOT EXISTS canvas_tasks (
   id TEXT PRIMARY KEY, owner INTEGER NOT NULL, kind TEXT NOT NULL, model TEXT NOT NULL,
   fingerprint TEXT NOT NULL, status TEXT NOT NULL, credential TEXT NOT NULL DEFAULT '',
+  account_id TEXT NOT NULL DEFAULT '',
   history_id TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
   deadline INTEGER NOT NULL, checked_at INTEGER NOT NULL DEFAULT 0
 )`);
+const taskColumns = new Set((database.prepare("PRAGMA table_info(canvas_tasks)").all() as Array<{ name: string }>).map((column) => column.name));
+if (!taskColumns.has("account_id")) database.exec("ALTER TABLE canvas_tasks ADD COLUMN account_id TEXT NOT NULL DEFAULT ''");
 // A process crash before receiving history_id is ambiguous: never submit again.
 database.prepare("UPDATE canvas_tasks SET status = 'failed', credential = '', error = '服务重启时提交结果未确认；为避免重复扣积分未自动重提，请检查即梦记录' WHERE status = 'submitting'").run();
 const polling = new Map<string, Promise<void>>();
@@ -29,7 +32,7 @@ export async function createTask(owner: number, authorization: string, body: unk
   }
   const credential = await resolveAuthorization(authorization, requestedAccountId);
   // resolveAuthorization yields: recheck for concurrent requests before inserting.
-  const reserved = database.prepare("INSERT OR IGNORE INTO canvas_tasks (id, owner, kind, model, fingerprint, status, credential, deadline) VALUES (?, ?, ?, ?, ?, 'submitting', ?, ?)").run(input.id, owner, input.kind, input.model, fingerprint, encrypt(credential.token), Date.now() + (input.kind === "image" ? 60 : 30) * 60_000);
+  const reserved = database.prepare("INSERT OR IGNORE INTO canvas_tasks (id, owner, kind, model, fingerprint, status, credential, account_id, deadline) VALUES (?, ?, ?, ?, ?, 'submitting', ?, ?, ?)").run(input.id, owner, input.kind, input.model, fingerprint, encrypt(credential.token), credential.accountId || "", Date.now() + (input.kind === "image" ? 60 : 30) * 60_000);
   if (!reserved.changes) return createTask(owner, authorization, body, requestedAccountId);
   const onSubmitted = (historyId: string) => {
     database.prepare("UPDATE canvas_tasks SET history_id = ?, status = 'running' WHERE id = ? AND status = 'submitting'").run(historyId, input.id);
@@ -38,7 +41,8 @@ export async function createTask(owner: number, authorization: string, body: unk
   void generateImages(input.model, input.prompt, { ratio: input.ratio, resolution: input.resolution, filePaths: input.images, n: 1, onSubmitted, beforeSubmit }, credential.token).catch((error) => {
     // Never return raw upstream errors, request configs, cookies or asset URLs.
     const message = String(error?.message || "");
-    if (credential.accountId) markFailure(credential.accountId, /4013/.test(message) ? 60 * 60_000 : 30_000);
+    const cooldownMs = accountFailureCooldown(error);
+    if (credential.accountId && cooldownMs !== null) markFailure(credential.accountId, cooldownMs);
     const known = /\(错误码: 4013\)$/.test(message)
       ? "即梦安全风控拒绝了本次请求（4013：疑似存在异常行为）；未自动重提，请前往即梦网页检查账号安全验证或联系即梦支持"
       : message.match(/当前即梦模型不支持所选(?:清晰度|时长)，未自动(?:降级|缩短)|^首帧上传失败$|^尾帧上传失败，未提交生成$/)?.[0];
@@ -58,9 +62,18 @@ export async function queryTask(owner: number, id: string) {
         const response = await request("post", "/mweb/v1/get_history_by_ids", decrypt(current.credential), { timeout: 15_000, data: { history_ids: [current.history_id], ...(current.kind === "image" ? { image_info: { width: 4096, height: 4096, format: "webp" } } : {}) } });
         const result = taskResult(response, current.history_id, current.kind);
         if (result.status === "running") return;
+        if (result.status === "failed" && current.account_id) {
+          const cooldownMs = accountFailureCooldown(result.error);
+          if (cooldownMs !== null) markFailure(current.account_id, cooldownMs);
+        }
         // The API does not return authoritative point spending; do not invent a zero-point bill.
-        database.prepare("UPDATE canvas_tasks SET status = ?, result = ?, error = ?, credential = '' WHERE id = ? AND status = 'running'").run(result.status, result.status === "succeeded" ? JSON.stringify(result.urls.map((url) => ({ url }))) : "", result.status === "failed" ? result.error : "", id);
-      })().catch(() => { /* Transient query failures retain the same upstream history and credential. */ }).finally(() => polling.delete(id));
+        const updated = database.prepare("UPDATE canvas_tasks SET status = ?, result = ?, error = ?, credential = '' WHERE id = ? AND status = 'running'").run(result.status, result.status === "succeeded" ? JSON.stringify(result.urls.map((url) => ({ url }))) : "", result.status === "failed" ? result.error : "", id);
+        if (updated.changes && result.status === "succeeded" && current.account_id) markSuccess(current.account_id);
+      })().catch((error) => {
+        const cooldownMs = accountFailureCooldown(error);
+        if (current.account_id && cooldownMs !== null) markFailure(current.account_id, cooldownMs);
+        // Transient query failures retain the same upstream history and credential.
+      }).finally(() => polling.delete(id));
       polling.set(id, work);
     }
     await polling.get(id);

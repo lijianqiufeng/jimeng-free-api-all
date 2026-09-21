@@ -209,6 +209,9 @@ export async function request(
           retries++;
           continue;
         }
+        const httpError: any = new Error(`HTTP ${response.status} ${response.statusText}`);
+        httpError.response = response;
+        throw httpError;
       }
 
       return checkResult(response);

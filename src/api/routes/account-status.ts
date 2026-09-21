@@ -24,7 +24,21 @@ export default {
           }
         })().finally(() => { refreshing = undefined; });
       }
-      return { accounts: accountPool.list().map(({ id, enabled, cooldownUntil, status }) => ({ id, enabled, cooldownUntil, status })) };
+      return {
+        accounts: accountPool.list().map(({ id, enabled, cooldownUntil, status }) => ({
+          id,
+          enabled,
+          cooldownUntil,
+          status: {
+            freeCredit: status.freeCredit,
+            purchaseCredit: status.purchaseCredit,
+            vipCredit: status.vipCredit,
+            totalCredit: status.totalCredit,
+            membership: status.membership,
+            checkedAt: status.checkedAt,
+          },
+        })),
+      };
     },
     "/status": async (request: Request) => {
       request.validate("headers.authorization", (value) => typeof value === "string");
@@ -47,7 +61,7 @@ export default {
         markCredentialSuccess(credential);
         return { account: { status: { ...credits, membership: "unknown" } } };
       } catch (error) {
-        markCredentialFailure(credential);
+        markCredentialFailure(credential, error);
         throw error;
       }
     },
