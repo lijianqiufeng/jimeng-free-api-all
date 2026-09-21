@@ -271,6 +271,13 @@ test("stream consume accepts split chunks and stops at the deadline", async () =
   assert.equal(timedOut.complete, false);
 });
 
+test("paid conversation POST uses a caller-provided conversation id", async () => {
+  const provided = "conv-provided-test-001";
+  const started = await startAgentConversation("session-a", "workspace-account-a", attachmentFixture, provided);
+  assert.equal(started.observation.conversationId, provided);
+  assert.equal(body(lastConversation).conversation_id, provided);
+});
+
 test("paid conversation POST keeps the account workspace id as a string", async () => {
   const workspaceId = await ensureAgentWorkspace("account-a", "session-a");
   await startAgentConversation("session-a", workspaceId, attachmentFixture);

@@ -1,10 +1,11 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { PassThrough } from "node:stream";
 import axios from "axios";
 import { database, createApiKey, validateApiKey } from "@/lib/database.ts";
-import accountPool from "@/lib/account-pool.ts";
+import accountPool, { encrypt } from "@/lib/account-pool.ts";
 import { upscaleTaskInput } from "@/api/controllers/upscale-task-contract.ts";
 import { createUpscaleTask, queryUpscaleTask, cancelUpscaleTask } from "@/api/controllers/upscale-tasks.ts";
 
@@ -18,8 +19,12 @@ let observedAccountIds: string[] = [];
 let paidPostTimeout = false;
 let conversationRet = "0";
 let hangStreams = false;
+let hangSubscribeHandshake = false;
 let uploads = 0;
 let lastConversationId = "";
+let rowAtPaidPost: any = null;
+let inspectTaskId = "";
+let historyIdLookups: string[][] = [];
 const sessionToAccount = new Map<string, string>();
 
 function header(config: any, name: string): string {
@@ -101,6 +106,7 @@ axios.defaults.adapter = async (config) => {
     agentConversationSubmissions++;
     recordAccount(config);
     lastConversationId = String(body(config).conversation_id || "");
+    if (inspectTaskId) rowAtPaidPost = readRow(inspectTaskId);
     if (paidPostTimeout) throw Object.assign(Error("timeout"), { code: "ETIMEDOUT" });
     if (conversationRet === "4013") {
       throw Object.assign(Error("[请求失败]: 生成失败，疑似存在异常行为 private-token-not-for-client (错误码: 4013)"));
@@ -111,6 +117,7 @@ axios.defaults.adapter = async (config) => {
     return { data: stream, status: 200, statusText: "OK", headers: {}, config };
   }
   if (url.includes("/creation_agent/v2/subscribe_session")) {
+    if (hangSubscribeHandshake) await new Promise((resolve) => setTimeout(resolve, 2000));
     recordAccount(config);
     const stream = new PassThrough();
     if (hangStreams) return { data: stream, status: 200, statusText: "OK", headers: {}, config };
@@ -118,6 +125,8 @@ axios.defaults.adapter = async (config) => {
     return { data: stream, status: 200, statusText: "OK", headers: {}, config };
   }
   if (url.includes("/get_history_by_ids")) {
+    const ids = body(config).history_ids;
+    historyIdLookups.push(Array.isArray(ids) ? ids.map(String) : []);
     const history = JSON.parse(fs.readFileSync("tests/fixtures/agent-8k-history-success.json", "utf8"));
     return ok(history);
   }
@@ -154,8 +163,12 @@ function resetNetwork() {
   paidPostTimeout = false;
   conversationRet = "0";
   hangStreams = false;
+  hangSubscribeHandshake = false;
   uploads = 0;
   lastConversationId = "";
+  rowAtPaidPost = null;
+  inspectTaskId = "";
+  historyIdLookups = [];
 }
 
 function readRow(id: string) {
@@ -303,5 +316,75 @@ test("query returns the current row without waiting for subscribe", async () => 
   } finally {
     hangStreams = false;
   }
+});
+
+test("restored query looks up history with the saved history id", async () => {
+  resetNetwork();
+  const account = isolateAccount("session-restore");
+  const id = "upscale_restore_1234567890";
+  const fingerprint = crypto.createHash("sha256").update(JSON.stringify({ id, image: input.image })).digest("hex");
+  database.prepare(`INSERT INTO agent_upscale_tasks (
+    id, owner, fingerprint, status, account_id, credential, workspace_id, conversation_id,
+    provider_task_id, history_id, deadline
+  ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)`).run(
+    id, owner, fingerprint, account.id, encrypt("session-restore"), "workspace-account-restore",
+    "conv-restore-001", "submit-test-001", "history-test-001", Date.now() + 60_000,
+  );
+  await queryUpscaleTask(owner, id);
+  await until(() => historyIdLookups.length > 0);
+  assert.deepEqual(historyIdLookups[0], ["history-test-001"]);
+  const row = readRow(id);
+  assert.equal(row.provider_task_id, "submit-test-001");
+  assert.equal(row.history_id, "history-test-001");
+});
+
+test("query at deadline returns without waiting for subscribe", async () => {
+  resetNetwork();
+  isolateAccount("session-deadline");
+  hangStreams = true;
+  hangSubscribeHandshake = true;
+  try {
+    const id = "upscale_deadline_1234567";
+    await createUpscaleTask(owner, authorization, { ...input, id });
+    await until(() => readStatus(id) === "running");
+    database.prepare("UPDATE agent_upscale_tasks SET deadline = ? WHERE id = ?").run(Date.now() - 1, id);
+    const started = Date.now();
+    const result = await queryUpscaleTask(owner, id);
+    assert.ok(Date.now() - started < 400);
+    assert.equal(result.status, 200);
+    assertPublicBodySafe(result, readRow(id));
+  } finally {
+    hangStreams = false;
+    hangSubscribeHandshake = false;
+  }
+});
+
+test("conversation_id is persisted before the paid POST and restart does not replay it", async () => {
+  resetNetwork();
+  isolateAccount("session-before-post");
+  const id = "upscale_before_post_1234";
+  inspectTaskId = id;
+  await createUpscaleTask(owner, authorization, { ...input, id });
+  await until(() => agentConversationSubmissions === 1);
+  assert.ok(rowAtPaidPost?.conversation_id);
+  assert.equal(rowAtPaidPost.conversation_id, lastConversationId);
+
+  const restartId = "upscale_restart_ro_12345";
+  const account = isolateAccount("session-restart-ro");
+  const fingerprint = crypto.createHash("sha256").update(JSON.stringify({ id: restartId, image: input.image })).digest("hex");
+  database.prepare(`INSERT INTO agent_upscale_tasks (
+    id, owner, fingerprint, status, account_id, credential, workspace_id, conversation_id, deadline
+  ) VALUES (?, ?, ?, 'submitting', ?, ?, ?, ?, ?)`).run(
+    restartId, owner, fingerprint, account.id, encrypt("session-restart-ro"), "workspace-account-restart-ro",
+    "conv-restart-readonly-1", Date.now() + 60_000,
+  );
+  const before = agentConversationSubmissions;
+  const queried = await queryUpscaleTask(owner, restartId);
+  assert.equal(queried.status, 200);
+  assert.equal(readStatus(restartId), "running");
+  assert.equal(readRow(restartId).error, "");
+  const created = await createUpscaleTask(owner, authorization, { ...input, id: restartId });
+  assert.equal(created.status, 200);
+  assert.equal(agentConversationSubmissions, before);
 });
 });

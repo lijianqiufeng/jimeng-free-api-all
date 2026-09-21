@@ -63,8 +63,8 @@ export async function startAgentConversation(
   token: string,
   workspaceId: string,
   attachment: AgentAttachment,
+  conversationId = util.uuid(),
 ): Promise<{ stream: NodeJS.ReadableStream; observation: AgentObservation }> {
-  const conversationId = util.uuid();
   const observation = createAgentObservation(conversationId);
   const response = await request("post", "/mweb/v1/creation_agent/v2/conversation", token, {
     params: {

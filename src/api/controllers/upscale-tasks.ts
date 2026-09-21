@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { database, saveMedia } from "@/lib/database.ts";
 import { encrypt, decrypt, markFailure, markSuccess } from "@/lib/account-pool.ts";
+import util from "@/lib/util.ts";
 import { accountFailureCooldown, resolveAuthorization } from "./auth.ts";
 import { AGENT_UPSCALE_PROMPT, createAgentObservation, type AgentObservation } from "./agent-upscale-protocol.ts";
 import {
@@ -36,6 +37,7 @@ type UpscaleTask = {
   reference_uri: string;
   reference_item_id: string;
   provider_task_id: string;
+  history_id: string;
   provider_label: string;
   credits_used: number | null;
   result: string;
@@ -56,6 +58,7 @@ database.exec(`CREATE TABLE IF NOT EXISTS agent_upscale_tasks (
   reference_uri TEXT NOT NULL DEFAULT '',
   reference_item_id TEXT NOT NULL DEFAULT '',
   provider_task_id TEXT NOT NULL DEFAULT '',
+  history_id TEXT NOT NULL DEFAULT '',
   provider_label TEXT NOT NULL DEFAULT '',
   credits_used INTEGER,
   result TEXT NOT NULL DEFAULT '',
@@ -68,9 +71,10 @@ const taskColumns = new Set((database.prepare("PRAGMA table_info(agent_upscale_t
 if (!taskColumns.has("reference_uri")) database.exec("ALTER TABLE agent_upscale_tasks ADD COLUMN reference_uri TEXT NOT NULL DEFAULT ''");
 if (!taskColumns.has("reference_item_id")) database.exec("ALTER TABLE agent_upscale_tasks ADD COLUMN reference_item_id TEXT NOT NULL DEFAULT ''");
 if (!taskColumns.has("account_id")) database.exec("ALTER TABLE agent_upscale_tasks ADD COLUMN account_id TEXT NOT NULL DEFAULT ''");
+if (!taskColumns.has("history_id")) database.exec("ALTER TABLE agent_upscale_tasks ADD COLUMN history_id TEXT NOT NULL DEFAULT ''");
 
-database.prepare("UPDATE agent_upscale_tasks SET status = 'failed', credential = '', error = ? WHERE status = 'submitting' AND provider_task_id = ''").run(UNCONFIRMED);
-database.prepare("UPDATE agent_upscale_tasks SET status = 'running' WHERE status = 'submitting' AND provider_task_id != ''").run();
+database.prepare("UPDATE agent_upscale_tasks SET status = 'failed', credential = '', error = ? WHERE status = 'submitting' AND conversation_id = '' AND provider_task_id = ''").run(UNCONFIRMED);
+database.prepare("UPDATE agent_upscale_tasks SET status = 'running' WHERE status = 'submitting' AND (conversation_id != '' OR provider_task_id != '')").run();
 
 const monitors = new Map<string, Promise<void>>();
 
@@ -104,6 +108,7 @@ function isRisk4013(error: unknown) {
 function restoreObservation(task: UpscaleTask): AgentObservation {
   const observation = createAgentObservation(task.conversation_id);
   if (task.provider_task_id) observation.submitId = task.provider_task_id;
+  if (task.history_id) observation.historyId = task.history_id;
   if (task.provider_label) observation.providerLabel = task.provider_label;
   if (task.credits_used != null) observation.creditsUsed = Number(task.credits_used);
   return observation;
@@ -112,12 +117,25 @@ function restoreObservation(task: UpscaleTask): AgentObservation {
 function persistObservation(id: string, observation: AgentObservation) {
   const task = get(id);
   if (!active(task)) return;
-  const providerId = observation.submitId || observation.historyId || task!.provider_task_id;
+  const submitId = observation.submitId || task!.provider_task_id;
+  const historyId = observation.historyId || task!.history_id;
   const conversationId = observation.conversationId || task!.conversation_id;
   const label = observation.providerLabel || task!.provider_label || "";
   const credits = observation.creditsUsed != null ? observation.creditsUsed : task!.credits_used;
-  database.prepare("UPDATE agent_upscale_tasks SET conversation_id = ?, provider_task_id = ?, provider_label = ?, credits_used = ? WHERE id = ? AND status IN ('submitting', 'running')")
-    .run(conversationId, providerId, label, credits, id);
+  database.prepare("UPDATE agent_upscale_tasks SET conversation_id = ?, provider_task_id = ?, history_id = ?, provider_label = ?, credits_used = ? WHERE id = ? AND status IN ('submitting', 'running')")
+    .run(conversationId, submitId, historyId, label, credits, id);
+}
+
+function watchObservation(id: string, observation: AgentObservation): AgentObservation {
+  return new Proxy(observation, {
+    set(target, prop, value) {
+      Reflect.set(target, prop, value);
+      if (prop === "submitId" || prop === "historyId" || prop === "providerLabel" || prop === "creditsUsed" || prop === "conversationId") {
+        persistObservation(id, target);
+      }
+      return true;
+    },
+  });
 }
 
 function failTask(id: string, error: string, cause?: unknown, cooldownMs?: number | null) {
@@ -169,30 +187,7 @@ async function refreshHistory(id: string, token: string, observation: AgentObser
     observation.failed = result.error;
     observation.complete = true;
   }
-}
-
-async function finalReadOnlyAttempt(task: UpscaleTask) {
-  if (!task.credential) {
-    failTask(task.id, WAIT_TIMEOUT);
-    return;
-  }
-  const token = decrypt(task.credential);
-  const observation = restoreObservation(task);
-  try { await refreshHistory(task.id, token, observation); } catch (error) {
-    const cooldown = accountFailureCooldown(error);
-    if (task.account_id && cooldown != null) markFailure(task.account_id, cooldown);
-  }
-  if (applyTerminal(task.id, observation)) return;
-  if (task.workspace_id && observation.conversationId) {
-    try { await subscribeAgentWorkspace(token, task.workspace_id, observation, task.deadline); } catch (error) {
-      const cooldown = accountFailureCooldown(error);
-      if (task.account_id && cooldown != null) markFailure(task.account_id, cooldown);
-    }
-    persistObservation(task.id, observation);
-    try { await refreshHistory(task.id, token, observation); } catch { /* keep last observation */ }
-    if (applyTerminal(task.id, observation)) return;
-  }
-  failTask(task.id, WAIT_TIMEOUT);
+  persistObservation(id, observation);
 }
 
 function classifySubmitFailure(id: string, error: unknown, paidAttempted: boolean) {
@@ -210,16 +205,21 @@ function classifySubmitFailure(id: string, error: unknown, paidAttempted: boolea
   failTask(id, GENERIC_FAIL, error, cooldown);
 }
 
-async function runMonitor(id: string, context?: { stream?: NodeJS.ReadableStream; observation: AgentObservation; token: string; workspaceId: string }) {
-  const task = get(id);
-  if (!task || task.status !== "running" || !task.credential) return;
+function promoteReadOnly(task: UpscaleTask) {
+  if (task.status !== "submitting" || !task.conversation_id) return task;
+  database.prepare("UPDATE agent_upscale_tasks SET status = 'running' WHERE id = ? AND status = 'submitting' AND conversation_id != ''").run(task.id);
+  return get(task.id) || task;
+}
+
+async function runMonitor(id: string, context?: { observation?: AgentObservation; token: string; workspaceId: string }) {
+  let task = get(id);
+  if (!task || !task.credential) return;
+  task = promoteReadOnly(task);
+  if (task.status !== "running") return;
   const token = context?.token || decrypt(task.credential);
   const workspaceId = context?.workspaceId || task.workspace_id;
-  const observation = context?.observation || restoreObservation(task);
+  const observation = context?.observation || watchObservation(id, restoreObservation(task));
   try {
-    if (context?.stream) await consumeAgentStream(context.stream, observation, task.deadline);
-    persistObservation(id, observation);
-    if (applyTerminal(id, observation)) return;
     try { await refreshHistory(id, token, observation); } catch (error) {
       const cooldown = accountFailureCooldown(error);
       if (task.account_id && cooldown != null) markFailure(task.account_id, cooldown);
@@ -229,10 +229,6 @@ async function runMonitor(id: string, context?: { stream?: NodeJS.ReadableStream
       }
     }
     if (applyTerminal(id, observation)) return;
-    if (Date.now() >= task.deadline) {
-      await finalReadOnlyAttempt(get(id)!);
-      return;
-    }
     if (workspaceId && observation.conversationId) {
       await subscribeAgentWorkspace(token, workspaceId, observation, task.deadline);
       persistObservation(id, observation);
@@ -243,7 +239,7 @@ async function runMonitor(id: string, context?: { stream?: NodeJS.ReadableStream
       if (applyTerminal(id, observation)) return;
     }
     const current = get(id);
-    if (current && active(current) && Date.now() >= current.deadline) await finalReadOnlyAttempt(current);
+    if (current && active(current) && Date.now() >= current.deadline) failTask(id, WAIT_TIMEOUT);
   } catch (error) {
     if (isRisk4013(error)) {
       classifySubmitFailure(id, error, true);
@@ -256,12 +252,40 @@ async function runMonitor(id: string, context?: { stream?: NodeJS.ReadableStream
   }
 }
 
-function ensureMonitor(id: string, context?: { stream?: NodeJS.ReadableStream; observation: AgentObservation; token: string; workspaceId: string }) {
+function ensureMonitor(id: string, context?: { observation?: AgentObservation; token: string; workspaceId: string }) {
   if (monitors.has(id)) return;
   const work = runMonitor(id, context).finally(() => {
     if (monitors.get(id) === work) monitors.delete(id);
   });
   monitors.set(id, work);
+}
+
+async function consumePaidStream(
+  id: string,
+  stream: NodeJS.ReadableStream,
+  observation: AgentObservation,
+  token: string,
+  workspaceId: string,
+) {
+  const task = get(id);
+  if (!task || !active(task)) return;
+  try {
+    await consumeAgentStream(stream, observation, task.deadline);
+    persistObservation(id, observation);
+    if (applyTerminal(id, observation)) return;
+    try { await refreshHistory(id, token, observation); } catch (error) {
+      const cooldown = accountFailureCooldown(error);
+      if (task.account_id && cooldown != null) markFailure(task.account_id, cooldown);
+      if (isRisk4013(error)) {
+        failTask(id, RISK_4013, error, RISK_COOLDOWN_MS);
+        return;
+      }
+    }
+    if (applyTerminal(id, observation)) return;
+    ensureMonitor(id, { observation, token, workspaceId });
+  } catch (error) {
+    classifySubmitFailure(id, error, true);
+  }
 }
 
 async function orchestrate(input: { id: string; image: string }, token: string, accountId: string) {
@@ -283,14 +307,17 @@ async function orchestrate(input: { id: string; image: string }, token: string, 
   const workspaceId = await ensureAgentWorkspace(accountId, token);
   database.prepare("UPDATE agent_upscale_tasks SET workspace_id = ? WHERE id = ? AND status = 'submitting'").run(workspaceId, id);
   if (stillSubmitting()?.status !== "submitting") return;
+  const conversationId = util.uuid();
+  database.prepare("UPDATE agent_upscale_tasks SET conversation_id = ? WHERE id = ? AND status = 'submitting'").run(conversationId, id);
+  if (stillSubmitting()?.status !== "submitting") return;
   let paidAttempted = false;
   try {
     paidAttempted = true;
-    const started = await startAgentConversation(token, workspaceId, attachment);
-    persistObservation(id, started.observation);
-    database.prepare("UPDATE agent_upscale_tasks SET status = 'running', conversation_id = ? WHERE id = ? AND status = 'submitting'")
-      .run(started.observation.conversationId, id);
-    ensureMonitor(id, { stream: started.stream, observation: started.observation, token, workspaceId });
+    const started = await startAgentConversation(token, workspaceId, attachment, conversationId);
+    const observation = watchObservation(id, started.observation);
+    persistObservation(id, observation);
+    database.prepare("UPDATE agent_upscale_tasks SET status = 'running' WHERE id = ? AND status = 'submitting'").run(id);
+    void consumePaidStream(id, started.stream, observation, token, workspaceId);
   } catch (error) {
     classifySubmitFailure(id, error, paidAttempted);
   }
@@ -315,14 +342,12 @@ export async function createUpscaleTask(owner: number, authorization: string, bo
 export async function queryUpscaleTask(owner: number, id: string) {
   let task = get(id);
   if (!task || task.owner !== owner) return { status: 404, body: { error: NOT_FOUND } };
-  if (active(task) && Date.now() >= task.deadline) {
-    await finalReadOnlyAttempt(task);
-  } else if (task.status === "running" && task.credential && Date.now() - task.checked_at >= QUERY_THROTTLE_MS) {
+  if (task.status === "submitting" && task.conversation_id) task = promoteReadOnly(task);
+  if (active(task) && task.credential && (Date.now() >= task.deadline || Date.now() - task.checked_at >= QUERY_THROTTLE_MS)) {
     database.prepare("UPDATE agent_upscale_tasks SET checked_at = ? WHERE id = ?").run(Date.now(), id);
     ensureMonitor(id);
   }
-  task = get(id)!;
-  return { status: 200, body: publicTask(task) };
+  return { status: 200, body: publicTask(get(id)!) };
 }
 
 export function cancelUpscaleTask(owner: number, id: string) {
