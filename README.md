@@ -107,6 +107,7 @@
 | **📝 实时日志** | 实时查看系统运行日志，支持按 `INFO` / `WARN` / `ERROR` 级别筛选，支持自动刷新和一键清理/导出日志文件。    |
 | **🖼️ 媒体回溯** | 所有生成的图片和视频都会自动记录在媒体库中，支持按类型（图片/视频）筛选，点击即可预览高清原图或播放视频。 |
 | **💳 积分追踪** | **[NEW]** 每次请求自动计算并记录消耗积分，实时更新 Token 的剩余积分，精准掌握额度使用情况。               |
+| **✨ 智能高清** | 独立「智能高清」页：提交一张 PNG/JPEG/WebP 原图；成功后以可拖动分割线对比**原图**与**即梦增强图**，并显示「上游标记 8K」。实际像素未经独立验证。 |
 
 ### 🚀 访问地址
 
@@ -123,6 +124,14 @@
 - **视频定制**：支持设置视频首尾帧（Image-to-Video），通过 `file_paths` 参数传递。
 - **智能分辨率**：4.x 图像模型默认 2K 高清，3.x 模型默认 1K。
 - **智能时长**：提示词包含 `5秒` 或 `10秒` 关键词时，自动调整视频生成时长。
+
+### ✨ Agent 智能高清
+
+- **异步任务**：`POST` / `GET` / `DELETE` `/v1/upscale/tasks`，仅接受管理端 `jm_` API Key，不接受即梦 Session ID。
+- **固定 Agent 模式**：服务端固定提示词「帮我8k高清放大」与自动模式，调用方不能覆盖提示词，也不会降级到 4K `super_resolution`。
+- **单图 data URL**：只接受一张 PNG/JPEG/WebP data URL，解码后不超过 25MB；不接受文件路径、`file:` URL 或 HTTP URL。
+- **上游标记 8K**：成功以即梦返回的 8K 标签为准，**不独立验证实际像素**。`providerLabel` 仅在上游明确给出时填写。
+- **失败不兜底**：不自动重提、不换账号、不改走普通 4K。
 
 ### 📐 智能比例检测
 
@@ -249,6 +258,12 @@ Authorization: Bearer sessionid_value
 Authorization: Bearer sessionid_1,sessionid_2,sessionid_3
 ```
 
+### 3. Agent 智能高清请使用管理 Key
+
+`/v1/upscale/tasks` **只接受**控制台创建的 `jm_...` Key。直接使用即梦 Session ID 会返回 401。
+
+当前实现走社区会话路径（即梦网页 session），**不是**火山引擎官方 API，也不是官方 OpenAPI。完整契约见 [API.md](API.md) §5.9。
+
 ---
 
 ## 📝 API 接口文档
@@ -299,13 +314,21 @@ Authorization: Bearer sessionid_1,sessionid_2,sessionid_3
 
 默认返回内置兜底模型列表；如果请求带有即梦 `Authorization`，服务会实时拉取官网图片/视频模型配置并缓存结果。可使用 `?refresh=true` 强制刷新缓存，使用 `?type=image` 或 `?type=video` 只返回指定类型模型。
 
+### 3. Agent 智能高清
+
+**POST** `/v1/upscale/tasks` · **GET** `/v1/upscale/tasks/:id` · **DELETE** `/v1/upscale/tasks/:id`
+
+仅接受 `jm_` Key 与单张 PNG/JPEG/WebP data URL（解码后 ≤25MB）。提示词由服务端固定。成功为**上游标记 8K**，实际像素未经独立验证。详见 [API.md](API.md) §5.9。
+
 ---
 
 ## ⚠️ 免责声明
 
 1. **服务稳定性**：本项目基于逆向 API 开发，不保证永久可用。建议优先使用 [即梦官方服务](https://jimeng.jianying.com/)。
-2. **非盈利性质**：本项目仅供个人研究交流学习，不接受任何形式的捐助，不用于商业用途。
-3. **使用规范**：请遵守相关法律法规，禁止生成违规内容。任何因使用本项目产生的后果由使用者自行承担。
+2. **非官方接口**：当前社区会话路径不是火山引擎官方 API，也不是官方 OpenAPI。请勿将其表述为火山引擎或即梦官方接口。
+3. **8K 标签边界**：Agent 智能高清的成功标签为「上游标记 8K」，实际像素未经独立验证。
+4. **非盈利性质**：本项目仅供个人研究交流学习，不接受任何形式的捐助，不用于商业用途。
+5. **使用规范**：请遵守相关法律法规，禁止生成违规内容。任何因使用本项目产生的后果由使用者自行承担。
 
 ---
 
@@ -319,6 +342,6 @@ The dashboard can create multiple `jm_...` API keys. Only a SHA-256 hash and a m
 
 The account pool is available through `/account-pool`. It stores multiple Jimeng cookies encrypted with AES-256-GCM, supports account enable/disable, round-robin selection, failure cooldowns, and status refresh. Set `JIMENG_ACCOUNT_POOL_KEY` (or `ACCOUNT_POOL_ENCRYPTION_KEY`) before adding accounts; keep it stable across restarts.
 
-When a managed API key is sent in `Authorization: Bearer jm_...`, the service selects an enabled Jimeng account automatically. Direct Jimeng session tokens remain supported for backward compatibility.
+When a managed API key is sent in `Authorization: Bearer jm_...`, the service selects an enabled Jimeng account automatically. Direct Jimeng session tokens remain supported for backward compatibility on image/video/chat routes. `/v1/upscale/tasks` accepts managed `jm_` keys only.
 
 `GET /v1/account/status` returns the selected account's cached/refreshed membership and credit status without exposing its cookie.

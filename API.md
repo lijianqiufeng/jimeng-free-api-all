@@ -19,6 +19,7 @@
   - [5.6 账号状态 `GET /v1/account/status`](#56-账号状态-get-v1accountstatus)
   - [5.7 Token 校验 `POST /token/check`](#57-token-校验-post-tokencheck)
   - [5.8 积分查询 `POST /token/points`](#58-积分查询-post-tokenpoints)
+  - [5.9 Agent 智能高清 `/v1/upscale/tasks`](#59-agent-智能高清-v1upscaletasks)
 - [6. 模型列表](#6-模型列表)
 - [7. 积分消耗说明](#7-积分消耗说明)
 - [8. 错误码](#8-错误码)
@@ -68,6 +69,8 @@ Authorization: Bearer jm_HmvKHn58jRdsq2Po-weIRZeZPnTfIFL_nU9DUWN-XPc
 ```
 
 > 注意：`jm_...` Key 必须先在管理端创建并关联账号，未注册的 Key 会返回 `API key is invalid or disabled`。
+>
+> Agent 智能高清（`/v1/upscale/tasks`）**只接受**管理端 `jm_` Key，不接受即梦 Session ID。
 
 ### 2.3 环境变量
 
@@ -116,6 +119,9 @@ curl http://localhost:8000/ping
 | GET | `/v1/account/status` | 账号积分/会员状态 | 必填 |
 | POST | `/token/check` | 校验 token 是否有效 | 无 |
 | POST | `/token/points` | 查询 token 积分 | 必填 |
+| POST | `/v1/upscale/tasks` | Agent 智能高清（创建任务） | 必填（仅 `jm_` Key） |
+| GET | `/v1/upscale/tasks/:id` | Agent 智能高清（查询任务） | 必填（仅 `jm_` Key） |
+| DELETE | `/v1/upscale/tasks/:id` | Agent 智能高清（停止等待） | 必填（仅 `jm_` Key） |
 | GET | `/account-pool/*` | 账号池管理（管理端） | 登录 |
 | GET | `/dashboard` | 管理控制台 | 登录 |
 
@@ -405,6 +411,110 @@ curl -X POST http://localhost:8000/token/points \
 
 ---
 
+### 5.9 Agent 智能高清 `/v1/upscale/tasks`
+
+异步 8K 智能高清任务。调用方只提交一张原图；服务端固定使用即梦 Agent **自动模式**和提示词「帮我8k高清放大」。无限画布 `/v1/tasks` 契约不变，本能力走独立路径 `/v1/upscale/tasks`。
+
+**鉴权**：仅管理端 `jm_` API Key。即梦 Session ID、未注册/禁用 Key 一律 `401`：`{ "error": "API Key 无效" }`。
+
+**固定行为**（调用方不能覆盖）：
+
+- 提示词固定为 `帮我8k高清放大`，自动 Agent 模式；请求体不要传 `prompt`。
+- 每个任务 ID 只向即梦发送一次付费会话 POST；失败后**不**自动重提、**不**换账号、**不**降级到 4K `super_resolution`。
+- 成功标准是即梦返回的 8K 标签，文档化为 **上游标记 8K**。实际像素**未经独立验证**。
+- `providerLabel` / `creditsUsed` 仅在上游明确给出时填写，不按模型名、提示词或余额差猜测。
+
+#### 创建任务 `POST /v1/upscale/tasks`
+
+##### 请求体（JSON）
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | string | 是 | 调用方生成的稳定任务 ID：16–100 位字母、数字、下划线或连字符 |
+| `image` | string | 是 | 单张图片 data URL：`data:image/png;base64,...`、`image/jpeg` 或 `image/webp`；解码后 ≤25MB |
+
+不接受服务端文件路径、`file:` URL、HTTP(S) URL，也不接受 multipart 文件上传。
+
+```bash
+curl -X POST http://localhost:8000/v1/upscale/tasks \
+  -H "Authorization: Bearer jm_xxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "upscale_task_demo_01",
+    "image": "data:image/png;base64,iVBORw0KGgo..."
+  }'
+```
+
+##### 状态码
+
+| HTTP | 含义 |
+|---|---|
+| 202 | 首次预留成功，后台提交中 |
+| 200 | 同 ID、同 Key、同输入指纹，幂等返回已有任务（不会再发付费 POST） |
+| 400 | 参数无效或暂无可用账号：`智能高清参数无效或暂无可用账号，请检查原图与账号状态` |
+| 401 | 非 `jm_` Key / Key 无效或已禁用 |
+| 409 | 同 ID 但输入或归属不同：`任务 ID 已使用，不能替换参数或归属` |
+
+首次成功预留响应示例：
+
+```json
+{
+  "id": "upscale_task_demo_01",
+  "status": "running",
+  "providerLabel": null
+}
+```
+
+对外 `status` 可能为 `running`、`succeeded`、`failed`、`canceled`（内部 `submitting` 对外也显示为 `running`）。请用 `GET` 轮询直到终态。
+
+付费 POST 超时或响应不确定时，任务进入 `failed`，错误文案为：
+
+`提交结果未确认；为避免重复扣积分未自动重提`
+
+#### 查询任务 `GET /v1/upscale/tasks/:id`
+
+```bash
+curl http://localhost:8000/v1/upscale/tasks/upscale_task_demo_01 \
+  -H "Authorization: Bearer jm_xxx"
+```
+
+成功且上游明确标记 8K 时：
+
+```json
+{
+  "id": "upscale_task_demo_01",
+  "status": "succeeded",
+  "providerLabel": "8K",
+  "creditsUsed": 4,
+  "data": [
+    { "url": "https://..." }
+  ]
+}
+```
+
+- `providerLabel` 为 `"8K"` 表示**上游标记 8K**，不是本服务实测像素。
+- 上游未明确返回标签或积分时，`providerLabel` 为 `null`，且响应中不出现 `creditsUsed`。
+- 任务不属于当前 Key、或不存在：`404` `{ "error": "任务不存在" }`。
+- `GET` 不会发起付费会话 POST。
+
+#### 停止等待 `DELETE /v1/upscale/tasks/:id`
+
+```bash
+curl -X DELETE http://localhost:8000/v1/upscale/tasks/upscale_task_demo_01 \
+  -H "Authorization: Bearer jm_xxx"
+```
+
+- **提交前取消**：阻止该 ID 的付费 POST。
+- **提交后取消**：只停止 CPA 侧等待，即梦已接收的任务可能继续运行。
+
+响应 `error` 文案固定为：
+
+`已停止等待；即梦已接收的任务可能继续运行，积分以即梦结算为准`
+
+`DELETE` 不会发起付费会话 POST。对尚未创建的合法 ID 会写入取消标记，后续同 ID 的 `POST` 返回 409。
+
+---
+
 ## 6. 模型列表
 
 ### 图像模型
@@ -535,7 +645,8 @@ print(resp.choices[0].message.content)
 
 ## 注意事项
 
-1. 服务基于即梦逆向接口，不保证永久可用，建议保留即梦官方渠道；
+1. 服务基于即梦逆向接口，不保证永久可用，建议保留即梦官方渠道；当前社区会话路径**不是**火山引擎官方 API / 官方 OpenAPI；
 2. 生成图片/视频会自动记录到管理端媒体库，可在 `/dashboard` 查看历史与统计；
-3. 参考图本地路径是**服务端文件系统路径**，远程调用请使用 URL 或 base64/multipart 上传；
-4. 账号池密钥 `JIMENG_ACCOUNT_POOL_KEY` 更换后无法解密旧账号凭据，请妥善保存。
+3. 参考图本地路径是**服务端文件系统路径**，远程调用请使用 URL 或 base64/multipart 上传；智能高清接口只接受 data URL，不接受文件路径或 HTTP URL；
+4. 账号池密钥 `JIMENG_ACCOUNT_POOL_KEY` 更换后无法解密旧账号凭据，请妥善保存；
+5. Agent 智能高清的成功标签为「上游标记 8K」，实际像素未经独立验证。
