@@ -34,7 +34,11 @@ export default [
                         'Cache-Control': 'public, max-age=86400'
                     }
                 });
-            }
+            },
+            "/upscale-ui.js": async () => new Response(await fs.readFile("public/upscale-ui.js"), {
+                type: "application/javascript",
+                headers: { "Cache-Control": "no-store" },
+            })
         }
     },
     images,
