@@ -26,6 +26,8 @@ test("automatic 8K request keeps IDs consistent and has no manual image args", (
     attachment,
   });
   assert.equal(request.conversation_id, "conv-client-test-001");
+  assert.equal(request.workspace_id, "10001");
+  assert.equal(typeof request.workspace_id, "string");
   assert.equal(request.messages[0].metadata.conversation_id, request.conversation_id);
   assert.equal(request.messages[0].content.content_parts[1].text, AGENT_UPSCALE_PROMPT);
   assert.equal(request.extra_info, JSON.stringify({ dreamina_agent_opt_mode: true }));

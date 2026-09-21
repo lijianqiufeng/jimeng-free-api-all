@@ -118,7 +118,7 @@ export function buildAgentConversation(input: {
       tools: [POINTS_CONSUMPTION_TOOL],
     }],
     version: "3.0.0",
-    workspace_id: Number(input.workspaceId),
+    workspace_id: input.workspaceId,
     extra_info: JSON.stringify({ dreamina_agent_opt_mode: true }),
   };
 }

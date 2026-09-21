@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { PassThrough } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import axios from "axios";
 import { createAgentObservation } from "@/api/controllers/agent-upscale-protocol.ts";
 import {
@@ -36,7 +36,9 @@ let getImageUris: unknown[] = [];
 let auditUriLists: unknown[] = [];
 let conversationPosts = 0;
 let timeoutConversation = false;
+let conversationHttpStatus = 200;
 let lastConversation: any;
+let lastSubscribe: any;
 let historyQueries = 0;
 let subscribeBodies: unknown[] = [];
 let subscribePayload = "";
@@ -129,11 +131,15 @@ axios.defaults.adapter = async (config) => {
     if (timeoutConversation) throw Object.assign(Error("timeout"), { code: "ETIMEDOUT" });
     const stream = new PassThrough();
     stream.end(fs.readFileSync("tests/fixtures/agent-8k-success.sse"));
+    if (conversationHttpStatus !== 200) {
+      return { data: stream, status: conversationHttpStatus, statusText: "Unauthorized", headers: {}, config };
+    }
     return { data: stream, status: 200, statusText: "OK", headers: {}, config };
   }
   if (url.includes("/creation_agent/v2/subscribe_session")) {
     const payload = body(config);
     if (payload.workspace_id == null || payload.workspace_id === "") throw Error("subscribe_session must send workspace_id");
+    lastSubscribe = config;
     subscribeBodies.push(payload);
     const stream = new PassThrough();
     queueMicrotask(() => stream.end(subscribePayload));
@@ -191,7 +197,9 @@ test("paid conversation POST sends stream headers, babi_param and unique IDs", a
   assert.ok(first.observation.conversationId);
   assert.notEqual(first.observation.conversationId, second.observation.conversationId);
   assert.equal(lastConversation.responseType, "stream");
+  assert.equal(lastConversation.timeout, 0);
   assert.match(header(lastConversation, "Accept"), /text\/event-stream/);
+  assert.equal(header(lastConversation, "Accept-Encoding"), "identity");
   assert.equal(queryParam(lastConversation, "region"), "cn");
   assert.equal(queryParam(lastConversation, "da_version"), "3.1.3");
   assert.deepEqual(JSON.parse(queryParam(lastConversation, "babi_param")), BABI_PARAM);
@@ -218,6 +226,8 @@ test("subscribe parses only events for the task conversation", async () => {
   ].join("\n");
   const observation = createAgentObservation("conv-keep");
   await subscribeAgentWorkspace("session-a", "workspace-account-a", observation, Date.now() + 1000);
+  assert.equal(lastSubscribe.timeout, 0);
+  assert.equal(header(lastSubscribe, "Accept-Encoding"), "identity");
   assert.deepEqual(subscribeBodies, [{ workspace_id: "workspace-account-a" }]);
   assert.equal(observation.historyId, "history-keep");
   assert.equal(observation.complete, false);
@@ -259,4 +269,39 @@ test("stream consume accepts split chunks and stops at the deadline", async () =
   await consumeAgentStream(hanging, timedOut, Date.now() + 30);
   assert.ok(Date.now() - started < 400);
   assert.equal(timedOut.complete, false);
+});
+
+test("paid conversation POST keeps the account workspace id as a string", async () => {
+  const workspaceId = await ensureAgentWorkspace("account-a", "session-a");
+  await startAgentConversation("session-a", workspaceId, attachmentFixture);
+  assert.equal(workspaceId, "workspace-account-a");
+  assert.equal(body(lastConversation).workspace_id, workspaceId);
+  assert.equal(typeof body(lastConversation).workspace_id, "string");
+});
+
+test("conversation HTTP 401 does not yield a readable success stream", async () => {
+  conversationHttpStatus = 401;
+  try {
+    await assert.rejects(
+      startAgentConversation("session-a", "workspace-account-a", attachmentFixture),
+      (error: any) => {
+        assert.match(String(error?.message), /^HTTP 401 Unauthorized$/);
+        assert.equal(error?.response, undefined);
+        return true;
+      },
+    );
+  } finally {
+    conversationHttpStatus = 200;
+  }
+});
+
+test("stream consume decodes a UTF-8 character split across chunks", async () => {
+  const sse = "event: system\ndata: {\"type\":\"conversation_created\",\"conversation_id\":\"conv-utf8\",\"history_record_id\":\"记录-001\"}\n\n";
+  const bytes = Buffer.from(sse, "utf8");
+  const splitAt = bytes.indexOf(Buffer.from("记录", "utf8")) + 1;
+  const stream = Readable.from([bytes.subarray(0, splitAt), bytes.subarray(splitAt)]);
+  const observation = createAgentObservation("conv-utf8");
+  await consumeAgentStream(stream, observation, Date.now() + 1000);
+  assert.equal(observation.historyId, "记录-001");
+  assert.equal(observation.conversationId, "conv-utf8");
 });

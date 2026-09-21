@@ -20,6 +20,12 @@ const BABI_PARAM = JSON.stringify({
   edit_type: "agent",
 });
 
+const STREAM_REQUEST = {
+  headers: { Accept: "text/event-stream", "Accept-Encoding": "identity" },
+  responseType: "stream" as const,
+  timeout: 0,
+};
+
 database.exec(`CREATE TABLE IF NOT EXISTS jimeng_agent_sessions (
   account_id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL,
@@ -66,8 +72,6 @@ export async function startAgentConversation(
       da_version: "3.1.3",
       babi_param: BABI_PARAM,
     },
-    headers: { Accept: "text/event-stream" },
-    responseType: "stream",
     data: buildAgentConversation({
       workspaceId,
       conversationId,
@@ -76,8 +80,9 @@ export async function startAgentConversation(
       createdAt: Date.now(),
       attachment,
     }),
+    ...STREAM_REQUEST,
   });
-  return { stream: response.data, observation };
+  return { stream: requireStreamOk(response), observation };
 }
 
 export async function subscribeAgentWorkspace(
@@ -88,10 +93,9 @@ export async function subscribeAgentWorkspace(
 ): Promise<void> {
   const response = await request("post", "/mweb/v1/creation_agent/v2/subscribe_session", token, {
     data: { workspace_id: workspaceId },
-    headers: { Accept: "text/event-stream" },
-    responseType: "stream",
+    ...STREAM_REQUEST,
   });
-  await consumeAgentStream(response.data, observation, deadline, { matchConversation: true });
+  await consumeAgentStream(requireStreamOk(response), observation, deadline, { matchConversation: true });
 }
 
 export async function queryAgentHistory(token: string, observation: AgentObservation): Promise<AgentHistoryResult> {
@@ -122,25 +126,45 @@ export async function consumeAgentStream(
     : undefined;
 
   let timedOut = false;
+  const decoder = new TextDecoder();
   const timer = setTimeout(() => {
     timedOut = true;
     destroyStream(stream);
   }, Math.max(0, deadline - Date.now()));
 
+  const feed = (text: string) => {
+    if (!text) return;
+    if (feeder) feeder.feed(text);
+    else feedAgentSse(observation, text);
+  };
+
   try {
     for await (const chunk of stream) {
       if (timedOut || Date.now() >= deadline) break;
-      const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk ?? "");
-      if (feeder) feeder.feed(text);
-      else feedAgentSse(observation, text);
+      feed(decodeStreamChunk(decoder, chunk));
       if (observation.complete) break;
     }
+    if (!timedOut && Date.now() < deadline) feed(decoder.decode());
   } catch (error) {
     if (timedOut || Date.now() >= deadline || observation.complete) return;
     throw error;
   } finally {
     clearTimeout(timer);
   }
+}
+
+function requireStreamOk(response: { status: number; statusText: string; data: NodeJS.ReadableStream }): NodeJS.ReadableStream {
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`);
+  }
+  return response.data;
+}
+
+function decodeStreamChunk(decoder: TextDecoder, chunk: unknown): string {
+  if (typeof chunk === "string") return decoder.decode(Buffer.from(chunk), { stream: true });
+  if (chunk instanceof Uint8Array || Buffer.isBuffer(chunk)) return decoder.decode(chunk, { stream: true });
+  if (chunk == null) return "";
+  return decoder.decode(Buffer.from(String(chunk)), { stream: true });
 }
 
 function sseConversationId(data: string): string | undefined {
