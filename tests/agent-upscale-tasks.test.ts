@@ -20,6 +20,8 @@ let paidPostTimeout = false;
 let conversationRet = "0";
 let hangStreams = false;
 let hangSubscribeHandshake = false;
+let subscribeThrow = false;
+let historyRet = "0";
 let uploads = 0;
 let lastConversationId = "";
 let rowAtPaidPost: any = null;
@@ -117,6 +119,7 @@ axios.defaults.adapter = async (config) => {
     return { data: stream, status: 200, statusText: "OK", headers: {}, config };
   }
   if (url.includes("/creation_agent/v2/subscribe_session")) {
+    if (subscribeThrow) throw Object.assign(Error("HTTP 401 Unauthorized"));
     if (hangSubscribeHandshake) await new Promise((resolve) => setTimeout(resolve, 2000));
     recordAccount(config);
     const stream = new PassThrough();
@@ -127,6 +130,7 @@ axios.defaults.adapter = async (config) => {
   if (url.includes("/get_history_by_ids")) {
     const ids = body(config).history_ids;
     historyIdLookups.push(Array.isArray(ids) ? ids.map(String) : []);
+    if (historyRet === "1015") return { data: { ret: "1015", errmsg: "登录失效" }, status: 200, statusText: "OK", headers: {}, config };
     const history = JSON.parse(fs.readFileSync("tests/fixtures/agent-8k-history-success.json", "utf8"));
     return ok(history);
   }
@@ -164,6 +168,8 @@ function resetNetwork() {
   conversationRet = "0";
   hangStreams = false;
   hangSubscribeHandshake = false;
+  subscribeThrow = false;
+  historyRet = "0";
   uploads = 0;
   lastConversationId = "";
   rowAtPaidPost = null;
@@ -386,5 +392,55 @@ test("conversation_id is persisted before the paid POST and restart does not rep
   const created = await createUpscaleTask(owner, authorization, { ...input, id: restartId });
   assert.equal(created.status, 200);
   assert.equal(agentConversationSubmissions, before);
+});
+
+test("query after deadline still fail-closes when subscribe throws", async () => {
+  resetNetwork();
+  const account = isolateAccount("session-deadline-throw");
+  subscribeThrow = true;
+  try {
+    const id = "upscale_deadline_throw_12";
+    const fingerprint = crypto.createHash("sha256").update(JSON.stringify({ id, image: input.image })).digest("hex");
+    database.prepare(`INSERT INTO agent_upscale_tasks (
+      id, owner, fingerprint, status, account_id, credential, workspace_id, conversation_id, deadline
+    ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)`).run(
+      id, owner, fingerprint, account.id, encrypt("session-deadline-throw"), "workspace-account-deadline-throw",
+      "conv-deadline-throw-1", Date.now() - 1,
+    );
+    const started = Date.now();
+    const result = await queryUpscaleTask(owner, id);
+    assert.ok(Date.now() - started < 400);
+    assert.equal(result.status, 200);
+    await until(() => readStatus(id) === "failed");
+    const row = readRow(id);
+    assert.equal(row.credential, "");
+    assert.match(String(row.error), /超时|未确认|401/);
+    assert.ok(Date.parse(accountPool.get(account.id).cooldownUntil || "") > Date.now());
+    assertPublicBodySafe(result, row);
+  } finally {
+    subscribeThrow = false;
+  }
+});
+
+test("submitting row past deadline without conversation is fail-closed without a paid POST", async () => {
+  resetNetwork();
+  const account = isolateAccount("session-stale-submit");
+  const id = "upscale_stale_submit_123";
+  const fingerprint = crypto.createHash("sha256").update(JSON.stringify({ id, image: input.image })).digest("hex");
+  database.prepare(`INSERT INTO agent_upscale_tasks (
+    id, owner, fingerprint, status, account_id, credential, deadline
+  ) VALUES (?, ?, ?, 'submitting', ?, ?, ?)`).run(
+    id, owner, fingerprint, account.id, encrypt("session-stale-submit"), Date.now() - 1,
+  );
+  const before = agentConversationSubmissions;
+  const started = Date.now();
+  const result = await queryUpscaleTask(owner, id);
+  assert.ok(Date.now() - started < 400);
+  assert.equal(result.status, 200);
+  await until(() => readStatus(id) === "failed");
+  assert.equal(agentConversationSubmissions, before);
+  assert.equal(uploads, 0);
+  assert.match(String(readRow(id).error), /超时|未确认/);
+  assert.equal(readRow(id).credential, "");
 });
 });

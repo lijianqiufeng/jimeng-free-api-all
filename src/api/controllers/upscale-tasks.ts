@@ -150,6 +150,18 @@ function failTask(id: string, error: string, cause?: unknown, cooldownMs?: numbe
   }
 }
 
+function deadlineFailMessage(task: UpscaleTask) {
+  if (!task.conversation_id && !task.provider_task_id) return UNCONFIRMED;
+  return WAIT_TIMEOUT;
+}
+
+function failClosedIfPastDeadline(id: string, cause?: unknown) {
+  const task = get(id);
+  if (!task || !active(task) || Date.now() < task.deadline) return false;
+  failTask(id, deadlineFailMessage(task), cause);
+  return true;
+}
+
 function succeedTask(id: string, observation: AgentObservation) {
   const task = get(id);
   if (!active(task)) return false;
@@ -213,26 +225,43 @@ function promoteReadOnly(task: UpscaleTask) {
 
 async function runMonitor(id: string, context?: { observation?: AgentObservation; token: string; workspaceId: string }) {
   let task = get(id);
-  if (!task || !task.credential) return;
+  if (!task || !active(task)) return;
+  if (!task.conversation_id && !task.provider_task_id && Date.now() >= task.deadline) {
+    failTask(id, UNCONFIRMED);
+    return;
+  }
+  if (!task.credential) {
+    failClosedIfPastDeadline(id);
+    return;
+  }
   task = promoteReadOnly(task);
-  if (task.status !== "running") return;
+  if (task.status !== "running") {
+    failClosedIfPastDeadline(id);
+    return;
+  }
   const token = context?.token || decrypt(task.credential);
   const workspaceId = context?.workspaceId || task.workspace_id;
   const observation = context?.observation || watchObservation(id, restoreObservation(task));
   try {
     try { await refreshHistory(id, token, observation); } catch (error) {
-      const cooldown = accountFailureCooldown(error);
-      if (task.account_id && cooldown != null) markFailure(task.account_id, cooldown);
       if (isRisk4013(error)) {
         failTask(id, RISK_4013, error, RISK_COOLDOWN_MS);
         return;
       }
+      if (failClosedIfPastDeadline(id, error)) return;
+      const cooldown = accountFailureCooldown(error);
+      if (task.account_id && cooldown != null) markFailure(task.account_id, cooldown);
     }
     if (applyTerminal(id, observation)) return;
     if (workspaceId && observation.conversationId) {
       await subscribeAgentWorkspace(token, workspaceId, observation, task.deadline);
       persistObservation(id, observation);
       try { await refreshHistory(id, token, observation); } catch (error) {
+        if (isRisk4013(error)) {
+          failTask(id, RISK_4013, error, RISK_COOLDOWN_MS);
+          return;
+        }
+        if (failClosedIfPastDeadline(id, error)) return;
         const cooldown = accountFailureCooldown(error);
         if (task.account_id && cooldown != null) markFailure(task.account_id, cooldown);
       }
@@ -245,6 +274,7 @@ async function runMonitor(id: string, context?: { observation?: AgentObservation
       classifySubmitFailure(id, error, true);
       return;
     }
+    if (failClosedIfPastDeadline(id, error)) return;
     const current = get(id);
     if (!current || !active(current)) return;
     const cooldown = accountFailureCooldown(error);
@@ -343,7 +373,7 @@ export async function queryUpscaleTask(owner: number, id: string) {
   let task = get(id);
   if (!task || task.owner !== owner) return { status: 404, body: { error: NOT_FOUND } };
   if (task.status === "submitting" && task.conversation_id) task = promoteReadOnly(task);
-  if (active(task) && task.credential && (Date.now() >= task.deadline || Date.now() - task.checked_at >= QUERY_THROTTLE_MS)) {
+  if (active(task) && (Date.now() >= task.deadline || (task.credential && Date.now() - task.checked_at >= QUERY_THROTTLE_MS))) {
     database.prepare("UPDATE agent_upscale_tasks SET checked_at = ? WHERE id = ?").run(Date.now(), id);
     ensureMonitor(id);
   }
