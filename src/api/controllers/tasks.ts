@@ -5,6 +5,7 @@ import { accountFailureCooldown, resolveAuthorization } from "./auth.ts";
 import { generateImages } from "./images.ts";
 import { request } from "./core.ts";
 import { taskInput, taskResult } from "./task-contract.ts";
+import { submitSeedanceVideo } from "./seedance.ts";
 
 type Task = { id: string; owner: number; kind: "image" | "video"; model: string; fingerprint: string; status: string; credential: string; account_id: string; history_id: string; result: string; error: string; deadline: number; checked_at: number };
 database.exec(`CREATE TABLE IF NOT EXISTS canvas_tasks (
@@ -30,7 +31,7 @@ export async function createTask(owner: number, authorization: string, body: unk
     if (previous.owner !== owner || previous.fingerprint !== fingerprint) return { status: 409, body: { error: "任务 ID 已使用，不能替换参数或归属" } };
     return { status: 200, body: publicTask(previous) };
   }
-  const credential = await resolveAuthorization(authorization, requestedAccountId);
+  const credential = await resolveAuthorization(authorization, requestedAccountId, input.model, true);
   // resolveAuthorization yields: recheck for concurrent requests before inserting.
   const reserved = database.prepare("INSERT OR IGNORE INTO canvas_tasks (id, owner, kind, model, fingerprint, status, credential, account_id, deadline) VALUES (?, ?, ?, ?, ?, 'submitting', ?, ?, ?)").run(input.id, owner, input.kind, input.model, fingerprint, encrypt(credential.token), credential.accountId || "", Date.now() + (input.kind === "image" ? 60 : 30) * 60_000);
   if (!reserved.changes) return createTask(owner, authorization, body, requestedAccountId);
@@ -38,14 +39,17 @@ export async function createTask(owner: number, authorization: string, body: unk
     database.prepare("UPDATE canvas_tasks SET history_id = ?, status = 'running' WHERE id = ? AND status = 'submitting'").run(historyId, input.id);
   };
   const beforeSubmit = () => { const current = get(input.id); if (current?.status !== "submitting" || Date.now() >= current.deadline) throw Error("任务已取消或超时"); };
-  void generateImages(input.model, input.prompt, { ratio: input.ratio, resolution: input.resolution, filePaths: input.images, n: 1, onSubmitted, beforeSubmit }, credential.token).catch((error) => {
+  const work = input.kind === "video"
+    ? submitSeedanceVideo(input, credential.token, { onSubmitted, beforeSubmit })
+    : generateImages(input.model, input.prompt, { ratio: input.ratio, resolution: input.resolution, filePaths: input.images, n: 1, onSubmitted, beforeSubmit }, credential.token);
+  void work.catch((error) => {
     // Never return raw upstream errors, request configs, cookies or asset URLs.
     const message = String(error?.message || "");
     const cooldownMs = accountFailureCooldown(error);
     if (credential.accountId && cooldownMs !== null) markFailure(credential.accountId, cooldownMs);
     const known = /\(错误码: 4013\)$/.test(message)
       ? "即梦安全风控拒绝了本次请求（4013：疑似存在异常行为）；未自动重提，请前往即梦网页检查账号安全验证或联系即梦支持"
-      : message.match(/当前即梦模型不支持所选(?:清晰度|时长)，未自动(?:降级|缩短)|^首帧上传失败$|^尾帧上传失败，未提交生成$/)?.[0];
+      : message.match(/当前即梦模型不支持所选(?:清晰度|时长)，未自动(?:降级|缩短)|^首帧上传失败$|^尾帧上传失败，未提交生成$|^(?:当前账号|当前视频|参考(?:图|音视频))[^\r\n]{0,70}，未提交生成$/)?.[0];
     database.prepare("UPDATE canvas_tasks SET status = 'failed', credential = '', error = ? WHERE id = ? AND status = 'submitting'").run(known || "即梦提交失败或结果未确认；未自动重提，请检查账号积分、权限和即梦生成记录", input.id);
   });
   return { status: 202, body: publicTask(get(input.id)!) };
@@ -80,7 +84,7 @@ export async function queryTask(owner: number, id: string) {
   }
   // Query once before expiring: the result may have completed while the browser was closed.
   task = get(id)!;
-  if (["running", "submitting"].includes(task.status) && Date.now() >= task.deadline) {
+  if (["running", "submitting"].includes(task.status) && Date.now() >= task.deadline && !(task.kind === "video" && task.history_id)) {
     database.prepare("UPDATE canvas_tasks SET status = 'failed', credential = '', error = '即梦任务等待超时，未重新生成；上游可能继续运行，请检查即梦记录' WHERE id = ? AND status IN ('running', 'submitting')").run(id);
   }
   return { status: 200, body: publicTask(get(id)!) };

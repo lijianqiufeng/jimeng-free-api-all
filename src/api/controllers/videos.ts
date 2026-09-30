@@ -6,6 +6,7 @@ import util from "@/lib/util.ts";
 import { getCredit, receiveCredit, request, uploadFile } from "./core.ts";
 import logger from "@/lib/logger.ts";
 import { JimengModelConfig, resolveVideoModelConfig } from "./models.ts";
+import { SEEDANCE_MODELS } from "./seedance-contract.ts";
 
 const DEFAULT_ASSISTANT_ID = 513695;
 export const DEFAULT_MODEL = "jimeng-video-seedance-2.0";
@@ -350,6 +351,7 @@ export async function generateVideo(
   refreshToken: string
 ) {
   const modelConfig = await resolveVideoModelConfig(_model, refreshToken);
+  if (Object.hasOwn(SEEDANCE_MODELS, modelConfig.id)) throw Error("当前即梦视频模型须使用 /v1/tasks 持久化任务接口，不自动降级或重提");
   const model = modelConfig.modelReqKey || getModel(_model);
   let finalResolution = resolution;
   if (!modelConfig.supportedResolutions.includes(finalResolution)) {
@@ -710,6 +712,7 @@ export async function generateVideoWithRetry(
 ): Promise<string> {
   // 降级策略: 先降分辨率，再降时长
   const modelConfig = await resolveVideoModelConfig(_model, refreshToken);
+  if (Object.hasOwn(SEEDANCE_MODELS, modelConfig.id)) throw Error("当前即梦视频模型须使用 /v1/tasks 持久化任务接口，不自动降级或重提");
   const resolutionLevels = getVideoResolutionFallbacks(
     _model,
     options.resolution,

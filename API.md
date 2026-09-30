@@ -4,6 +4,39 @@
 
 ---
 
+## 画布四视频模型异步任务（未部署）
+
+当前仅本地实现与离线测试通过；用户取消真实生成和本轮部署。下列能力不能据此标为实际出片验证通过。
+
+使用管理端 `jm_` API Key 调用 `POST /v1/tasks`、`GET /v1/tasks/:id`、`DELETE /v1/tasks/:id`。任务 ID 须在首次 POST 前保存；相同 ID 与参数返回原任务，不重复生成，不同归属或参数冲突返回 409。账号池凭据和上游历史 ID 由服务端保存，不返回客户端。
+
+| model | resolution | duration | 图片 / 视频 / 音频 / 合计 |
+| --- | --- | --- | --- |
+| `jimeng-video-seedance-2.5` | 480p / 720p / 1080p | 4–30 秒 | 30 / 10 / 10 / 50 |
+| `jimeng-video-seedance-2.0-mini` | 720p | 4–15 秒 | 9 / 3 / 3 / 12 |
+| `jimeng-video-seedance-2.0-fast-vip` | 720p | 4–15 秒 | 9 / 3 / 3 / 12 |
+| `jimeng-video-seedance-2.0-vip` | 720p / 1080p / 4k | 4–15 秒 | 9 / 3 / 3 / 12 |
+
+```json
+{
+  "id": "canvas_video_example_0001",
+  "model": "jimeng-video-seedance-2.5",
+  "prompt": "蓝色小球缓慢滚动，镜头跟随",
+  "ratio": "16:9",
+  "resolution": "720p",
+  "duration": 4,
+  "references": []
+}
+```
+
+每项参考为 `{ "kind": "image|video|audio", "url": "…" }`，列表顺序就是素材编号。图片仅 PNG/JPEG/WebP data URL，单张 25MB、合计 40MB；音视频仅团队 TOS 公网 HTTPS 签名 URL，禁止内网、文件路径和重定向。音频单个 15MB，视频单个 2.5 为 200MB、其他为 50MB；上传后还核对时长、尺寸与帧率，任一失败均不提交生成。2.0 系列音频参考须同时提供图片或视频。
+
+比例固定为 16:9、9:16、1:1、4:3、3:4、21:9，每任务一个视频；不支持样片、长视频、视频编辑或自动时长。创建前必须读到账号动态模型配置和当前权益，失败不静默降级。四型号及别名不走旧 `/v1/videos/generations` / 聊天生成路径。
+
+状态为 running / succeeded / failed / canceled，成功 `data` 仅含本任务视频 URL。默认等待 30 分钟，已经取得历史 ID 的视频仍可继续查询原任务；断线或重启不得 POST 新任务代替恢复。删除仅停止等待，不能保证撤销上游或退积分。当前无精确逐单积分字段，不将账号余额差或零配置价格伪装为实际消费。
+
+---
+
 ## 目录
 
 - [1. 服务地址](#1-服务地址)
@@ -199,7 +232,7 @@ curl -X POST http://localhost:8000/v1/images/generations \
 }
 ```
 
-`response_format=b64_json` 时 `data[]` 返回 `{ "b64_json": "..." }`。生成张数由 `n` 控制（1~8，默认 1 张；即梦按张数消耗积分）。
+`response_format=b64_json` 时 `data[]` 返回 `{ "b64_json": "..." }`。生成张数由 `n` 控制（1~8，默认 1 张；即梦按张数消耗积分）。接口等待所选张数齐全，不会自动触发网页的“继续生成”；上游终态仍不足时明确报错。画布单张任务可使用 `ratio=auto`，由即梦智能决定图片比例。
 
 ---
 
@@ -413,15 +446,16 @@ curl -X POST http://localhost:8000/token/points \
 
 ### 5.9 Agent 智能高清 `/v1/upscale/tasks`
 
-异步 8K 智能高清任务。调用方只提交一张原图；服务端固定使用即梦 Agent **自动模式**和提示词「帮我8k高清放大」。无限画布 `/v1/tasks` 契约不变，本能力走独立路径 `/v1/upscale/tasks`。
+异步 4K / 8K 智能高清任务。调用方只提交一张原图并选择分辨率；默认 8K。服务端使用即梦 Agent **自动模式**，按分辨率固定提示词。无限画布 `/v1/tasks` 契约不变，本能力走独立路径 `/v1/upscale/tasks`。
 
 **鉴权**：仅管理端 `jm_` API Key。即梦 Session ID、未注册/禁用 Key 一律 `401`：`{ "error": "API Key 无效" }`。
 
 **固定行为**（调用方不能覆盖）：
 
-- 提示词固定为 `帮我8k高清放大`，自动 Agent 模式；请求体不要传 `prompt`。
+- 8K 提示词固定为 `帮我8k高清放大`，4K 提示词固定为 `帮我4k高清放大`，均使用自动 Agent 模式；请求体不要传 `prompt`。
 - 每个任务 ID 只向即梦发送一次付费会话 POST；失败后**不**自动重提、**不**换账号、**不**降级到 4K `super_resolution`。
-- 成功标准是即梦返回的 8K 标签，文档化为 **上游标记 8K**。实际像素**未经独立验证**。
+- 上游明确返回失败时立即收口。付费会话 20 分钟内若始终没有任务编号、历史编号或结果，任务超时失败；已获得编号的任务继续按 60 分钟总上限等待。超时与 `DELETE` 只停止本服务等待，不保证即梦已接收的任务会被撤销或不扣积分。
+- 成功标准是即梦返回结果图地址；上游分辨率标签可能缺失，实际像素需检查下载图。单次真实验收得到 4K 4466×2160、8K 8192×8192 的 PNG，不能据此保证每张图尺寸相同。
 - `providerLabel` / `creditsUsed` 仅在上游明确给出时填写，不按模型名、提示词或余额差猜测。
 
 #### 创建任务 `POST /v1/upscale/tasks`
@@ -432,6 +466,7 @@ curl -X POST http://localhost:8000/token/points \
 |---|---|---|---|
 | `id` | string | 是 | 调用方生成的稳定任务 ID：16–100 位字母、数字、下划线或连字符 |
 | `image` | string | 是 | 单张图片 data URL：`data:image/png;base64,...`、`image/jpeg` 或 `image/webp`；解码后 ≤25MB |
+| `resolution` | `"4k"` 或 `"8k"` | 否 | Agent 放大模式；省略时为 `"8k"`。同 ID 重发时模式必须一致 |
 
 不接受服务端文件路径、`file:` URL、HTTP(S) URL，也不接受 multipart 文件上传。
 
@@ -441,7 +476,8 @@ curl -X POST http://localhost:8000/v1/upscale/tasks \
   -H "Content-Type: application/json" \
   -d '{
     "id": "upscale_task_demo_01",
-    "image": "data:image/png;base64,iVBORw0KGgo..."
+    "image": "data:image/png;base64,iVBORw0KGgo...",
+    "resolution": "8k"
   }'
 ```
 
@@ -461,6 +497,7 @@ curl -X POST http://localhost:8000/v1/upscale/tasks \
 {
   "id": "upscale_task_demo_01",
   "status": "running",
+  "resolution": "8k",
   "providerLabel": null
 }
 ```
@@ -478,13 +515,14 @@ curl http://localhost:8000/v1/upscale/tasks/upscale_task_demo_01 \
   -H "Authorization: Bearer jm_xxx"
 ```
 
-成功且上游明确标记 8K 时：
+成功响应示例（上游未提供分辨率标签）：
 
 ```json
 {
   "id": "upscale_task_demo_01",
   "status": "succeeded",
-  "providerLabel": "8K",
+  "resolution": "8k",
+  "providerLabel": null,
   "creditsUsed": 4,
   "data": [
     { "url": "https://..." }
@@ -492,8 +530,8 @@ curl http://localhost:8000/v1/upscale/tasks/upscale_task_demo_01 \
 }
 ```
 
-- `providerLabel` 为 `"8K"` 表示**上游标记 8K**，不是本服务实测像素。
-- 上游未明确返回标签或积分时，`providerLabel` 为 `null`，且响应中不出现 `creditsUsed`。
+- `resolution` 是请求模式，不代表实测像素；`providerLabel` 为 `"4K"` 或 `"8K"` 时只表示上游明确给出了该标签。
+- 上游未明确返回标签时，`providerLabel` 为 `null`；未明确返回积分时，响应中不出现 `creditsUsed`。两者相互独立。
 - 任务不属于当前 Key、或不存在：`404` `{ "error": "任务不存在" }`。
 - `GET` 不会发起付费会话 POST。
 
@@ -649,4 +687,8 @@ print(resp.choices[0].message.content)
 2. 生成图片/视频会自动记录到管理端媒体库，可在 `/dashboard` 查看历史与统计；
 3. 参考图本地路径是**服务端文件系统路径**，远程调用请使用 URL 或 base64/multipart 上传；智能高清接口只接受 data URL，不接受文件路径或 HTTP URL；
 4. 账号池密钥 `JIMENG_ACCOUNT_POOL_KEY` 更换后无法解密旧账号凭据，请妥善保存；
-5. Agent 智能高清的成功标签为「上游标记 8K」，实际像素未经独立验证。
+5. Agent 智能高清可请求 4K 或 8K；请求模式与上游标签都不代替实际像素核验。
+
+### 高级账号与 5.0 Pro
+
+账号池名称以 `_高级` 结尾（忽略末尾空格）的账号不参与 `jimeng-image-5.0-pro` / `high_aes_general_v50p_large` 新任务分配。自动轮转会跳过，显式指定会返回明确错误；新建或改名后立即生效。没有合格普通账号时不会回退消耗高级账号。Lite、4.7、4K/8K 高清和视频仍按原规则选择，已有任务继续使用原账号查询。API Key 数量无需与账号数量对应。

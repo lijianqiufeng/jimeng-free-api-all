@@ -10,6 +10,10 @@ const TABLE = "jimeng_accounts";
 
 export type AccountCredentialKind = "cookie" | "sessionid";
 export type AccountSelectionStrategy = "round_robin" | "least_failures";
+export const MIN_PAID_CREDIT = 5;
+export function accountSupportsModel(name: string, model: string): boolean {
+  return !name.trim().endsWith("_高级") || !["jimeng-image-5.0-pro", "high_aes_general_v50p_large"].includes(model.trim().toLowerCase());
+}
 
 export interface AccountPoolCreateInput {
   name: string;
@@ -317,16 +321,19 @@ export function setAccountEnabled(id: string, enabled: boolean): PublicAccount {
   return getAccount(id);
 }
 
-export function selectAccount(strategy: AccountSelectionStrategy = "least_failures"): AccountSelection {
+export function selectAccount(strategy: AccountSelectionStrategy = "least_failures", model = ""): AccountSelection {
   const reserve = db.transaction(() => {
     const timestamp = now();
-    const order = strategy === "round_robin"
-      ? "selection_seq ASC, id ASC"
-      : "failure_count ASC, selection_seq ASC, id ASC";
-    const row = db.prepare(`SELECT * FROM ${TABLE} WHERE enabled = 1 AND (cooldown_until IS NULL OR cooldown_until <= ?) ORDER BY ${order} LIMIT 1`)
-      .get(timestamp) as AccountRow | undefined;
-    if (!row) throw new Error("没有可用的即梦账号");
+    const rows = db.prepare(`SELECT * FROM ${TABLE} WHERE enabled = 1 AND (cooldown_until IS NULL OR cooldown_until <= ?) ORDER BY selection_seq ASC, id ASC`)
+      .all(timestamp) as AccountRow[];
+    const paid = Boolean(model && !/lite/i.test(model));
+    const eligible = rows.filter((row) => accountSupportsModel(row.name, model) && (!paid || row.total_credit !== null && row.total_credit >= MIN_PAID_CREDIT));
+    const candidates = strategy === "round_robin" || !eligible.length ? eligible : eligible.filter((row) => row.failure_count === Math.min(...eligible.map((item) => item.failure_count)));
+    const equalWeight = !paid || candidates.every((row) => row.total_credit !== null && row.total_credit >= 30);
     const sequence = (db.prepare(`SELECT COALESCE(MAX(selection_seq), 0) + 1 AS value FROM ${TABLE}`).get() as { value: number }).value;
+    const weight = (row: AccountRow) => equalWeight ? 1 : 1 + 3 * Math.min(1, Math.max(0, row.total_credit ?? 0) / 30);
+    const row = candidates.reduce<AccountRow | undefined>((best, item) => !best || (sequence - item.selection_seq) * weight(item) > (sequence - best.selection_seq) * weight(best) ? item : best, undefined);
+    if (!row) throw new Error(!accountSupportsModel("_高级", model) ? "没有可用于 5.0 Pro 的普通账号；_高级账号保留给其他模型，普通账号须至少 5 积分" : paid ? "没有积分达到 5 的即梦账号；低于 5 积分的账号仅用于 Lite" : "没有可用的即梦账号");
     db.prepare(`UPDATE ${TABLE} SET selection_seq = ?, last_used_at = ?, updated_at = ? WHERE id = ?`).run(sequence, timestamp, timestamp, row.id);
     return row;
   });
@@ -338,10 +345,11 @@ export function selectAccount(strategy: AccountSelectionStrategy = "least_failur
 }
 
 /** Select one specific enabled account for an already-bound task or status check. */
-export function selectAccountById(id: string): AccountSelection {
+export function selectAccountById(id: string, model = ""): AccountSelection {
   const row = db.prepare(`SELECT * FROM ${TABLE} WHERE id = ? AND enabled = 1 AND (cooldown_until IS NULL OR cooldown_until <= ?)`)
     .get(id, now()) as AccountRow | undefined;
   if (!row) throw new Error("指定的即梦账号不可用");
+  if (!accountSupportsModel(row.name, model)) throw new Error("名称以 _高级 结尾的账号不用于 5.0 Pro；本次未提交生成");
   const timestamp = now();
   db.prepare(`UPDATE ${TABLE} SET last_used_at = ?, updated_at = ? WHERE id = ?`).run(timestamp, timestamp, row.id);
   const credential = decrypt(row.credential_ciphertext);

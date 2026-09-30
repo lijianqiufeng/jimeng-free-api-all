@@ -1,6 +1,11 @@
+import { publicJimengFailure } from "./task-errors.ts";
 import { createParser, type ParseEvent } from "eventsource-parser";
 
 export const AGENT_UPSCALE_PROMPT = "帮我8k高清放大";
+export const AGENT_4K_UPSCALE_PROMPT = "帮我4k高清放大";
+export type AgentUpscaleResolution = "4k" | "8k";
+export const agentUpscalePrompt = (resolution: AgentUpscaleResolution, detailStrength?: number) =>
+  (resolution === "4k" ? AGENT_4K_UPSCALE_PROMPT : AGENT_UPSCALE_PROMPT) + (detailStrength === undefined ? "" : `，细节生成程度${detailStrength}`);
 export const SUPER_RESOLUTION_TOOL = "creative_agent_mcp_gen_image_super_resolution_v3";
 
 const POINTS_REMINDER_DESCRIPTION = `该工具用于向用户发出提示，提醒用户后续的生视频链路可能会消耗较多积分。**发出提示一定要通过该工具进行，不可以通过自然语言进行。**
@@ -59,6 +64,17 @@ export type AgentHistoryResult =
     }
   | { status: "failed"; error: string };
 
+export function usableAgentId(value: unknown): string | undefined {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value === 0) return undefined;
+    return String(Math.trunc(value));
+  }
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "0") return undefined;
+  return trimmed;
+}
+
 export function createAgentObservation(conversationId: string): AgentObservation {
   return { conversationId, urls: [], complete: false };
 }
@@ -70,11 +86,14 @@ export function buildAgentConversation(input: {
   fileId: string;
   createdAt: number;
   attachment: AgentAttachment;
+  resolution?: AgentUpscaleResolution;
+  detailStrength?: number;
 }) {
   const itemId = input.attachment.itemId;
+  const prompt = agentUpscalePrompt(input.resolution || "8k", input.detailStrength);
   const metrics = {
     userMessageId: input.messageId,
-    prompt: AGENT_UPSCALE_PROMPT,
+    prompt,
     isAddImage: 1,
     conversationId: input.conversationId,
     hasRejectedAudit: 0,
@@ -111,7 +130,7 @@ export function buildAgentConversation(input: {
               id: input.fileId,
             },
           },
-          { text: AGENT_UPSCALE_PROMPT, is_referenced: false },
+          { text: prompt, is_referenced: false },
         ],
       },
       create_time: input.createdAt,
@@ -133,23 +152,25 @@ export function feedAgentSse(state: AgentObservation, chunk: string): void {
 }
 
 export function mergeAgentHistory(state: AgentObservation, history: unknown): AgentHistoryResult {
-  const matched = findHistoryRecord(history, state.submitId);
+  const matched = findHistoryRecord(history, state.submitId, state.historyId);
   if (!matched) return { status: "running" };
+  const nestedSubmit = usableAgentId(matched.task?.submit_id);
+  if (nestedSubmit) state.submitId = nestedSubmit;
   const status = Number(matched.status);
   if (status === 30) {
     const error = sanitizedHistoryFailure(matched);
     state.failed = error;
     state.complete = true;
-    if (typeof matched.history_record_id === "string" && matched.history_record_id) {
-      state.historyId = matched.history_record_id;
-    }
+    const failedHistoryId = usableAgentId(matched.history_record_id) || usableAgentId(matched.id);
+    if (failedHistoryId) state.historyId = failedHistoryId;
     return { status: "failed", error };
   }
   if (status !== 21 && status !== 50) return { status: "running" };
   const urls = httpsImageUrls(matched);
   if (!urls.length) return { status: "running" };
-  if (String(matched.forecast_resolution) === "8k") state.providerLabel = "8K";
-  const historyId = String(matched.history_record_id || matched.id || "");
+  const forecastResolution = providerResolutionLabel(matched.forecast_resolution);
+  if (forecastResolution) state.providerLabel = forecastResolution;
+  const historyId = usableAgentId(matched.history_record_id) || usableAgentId(matched.id) || "";
   if (historyId) state.historyId = historyId;
   state.urls = urls;
   state.complete = true;
@@ -168,6 +189,9 @@ function applySseEvent(state: AgentObservation, event: ParseEvent): void {
   const payload = parseJsonValue(event.data);
   if (payload === undefined) return;
   inspectJson(state, payload, new Set());
+  if (event.event === "stream_complete" && payload && typeof payload === "object" && !Array.isArray(payload) && isFailedCompletion(payload as Record<string, unknown>)) {
+    markStreamFailure(state);
+  }
 }
 
 function inspectJson(state: AgentObservation, value: unknown, seen: Set<object>): void {
@@ -180,24 +204,25 @@ function inspectJson(state: AgentObservation, value: unknown, seen: Set<object>)
   if (seen.has(value)) return;
   seen.add(value);
   const record = value as Record<string, unknown>;
-  if (record.type === "conversation_created" && typeof record.conversation_id === "string" && record.conversation_id) {
-    state.conversationId = record.conversation_id;
-  } else if (typeof record.conversation_id === "string" && record.conversation_id) {
-    state.conversationId = record.conversation_id;
-  }
+  const conversationId = usableAgentId(record.conversation_id);
+  if (conversationId) state.conversationId = conversationId;
   const resolution = nestedResolutionType(record);
-  if (resolution === "8k") state.providerLabel = "8K";
+  const resolutionLabel = providerResolutionLabel(resolution);
+  if (resolutionLabel) state.providerLabel = resolutionLabel;
   const toolName = typeof record.name === "string" ? record.name : typeof (record.func as { name?: unknown } | undefined)?.name === "string" ? (record.func as { name: string }).name : undefined;
-  if (toolName === SUPER_RESOLUTION_TOOL && resolution === "8k") state.providerLabel = "8K";
-  if (typeof record.submit_id === "string" && record.submit_id) state.submitId = record.submit_id;
+  if (toolName === SUPER_RESOLUTION_TOOL && resolutionLabel) state.providerLabel = resolutionLabel;
+  const submitId = usableAgentId(record.submit_id);
+  if (submitId) state.submitId = submitId;
   if (record.data && typeof record.data === "object") {
     const data = record.data as Record<string, unknown>;
-    if (typeof data.submit_id === "string" && data.submit_id) state.submitId = data.submit_id;
+    const nestedSubmitId = usableAgentId(data.submit_id);
+    if (nestedSubmitId) state.submitId = nestedSubmitId;
     applyCommerce(state, data.commerce_info);
   }
   applyCommerce(state, record.commerce_info);
-  if (typeof record.history_record_id === "string" && record.history_record_id) state.historyId = record.history_record_id;
-  if (record.type === "stream_complete") state.complete = true;
+  const historyId = usableAgentId(record.history_record_id) || usableAgentId(record.history_id);
+  if (historyId) state.historyId = historyId;
+  if (record.type === "stream_complete" && (state.urls.length > 0 || state.failed)) state.complete = true;
   if (isTerminalError(record)) markStreamFailure(state);
   for (const nested of Array.isArray(value) ? value : Object.values(record)) inspectJson(state, nested, seen);
 }
@@ -210,6 +235,29 @@ function nestedResolutionType(record: Record<string, unknown>): string | undefin
   return typeof value === "string" ? value : undefined;
 }
 
+export function mergeAgentSession(state: AgentObservation, assets: unknown): void {
+  const list = (assets as { asset_list?: any[] })?.asset_list;
+  if (!Array.isArray(list)) return;
+  const session = list.map((item) => item?.agent_conversation_session?.conversation_session)
+    .find((item) => item?.conversation_id === state.conversationId);
+  if (!session?.mapping || typeof session.mapping !== "object") return;
+  // Only server tool replies contain generation receipts. User prompts and
+  // assistant prose (including "已提交") cannot establish a submitted task.
+  for (const message of Object.values(session.mapping) as any[]) {
+    if (message?.author?.role !== "tool") continue;
+    for (const part of message.content?.content_parts || []) {
+      if (typeof part.text === "string") inspectJson(state, part.text, new Set());
+    }
+  }
+}
+
+function providerResolutionLabel(value: unknown): "4K" | "8K" | undefined {
+  const resolution = String(value || "").toLowerCase();
+  if (resolution === "4k") return "4K";
+  if (resolution === "8k") return "8K";
+  return undefined;
+}
+
 function applyCommerce(state: AgentObservation, commerce: unknown): void {
   if (!commerce || typeof commerce !== "object") return;
   const info = commerce as { credit_count?: unknown; credit_display_info?: { actual_credits?: unknown } };
@@ -220,9 +268,18 @@ function applyCommerce(state: AgentObservation, commerce: unknown): void {
 function isTerminalError(record: Record<string, unknown>): boolean {
   const type = String(record.type || "");
   if (type === "error" || type === "system_error" || type.endsWith("_error")) return true;
+  if (type === "stream_complete" && isFailedCompletion(record)) return true;
   if (typeof record.result_code === "number" && record.result_code !== 0) return true;
   const submit = record.submit_info as { code?: unknown } | undefined;
   if (typeof submit?.code === "number" && submit.code !== 0) return true;
+  return false;
+}
+
+function isFailedCompletion(record: Record<string, unknown>): boolean {
+  if (record.success === false || record.success === 0) return true;
+  const code = record.error_code;
+  if (typeof code === "number") return code !== 0;
+  if (typeof code === "string") return code.trim() !== "" && code.trim() !== "0";
   return false;
 }
 
@@ -241,12 +298,17 @@ function parseJsonValue(text: string): unknown {
   }
 }
 
-function findHistoryRecord(history: unknown, submitId: string | undefined): Record<string, any> | undefined {
-  if (!submitId) return undefined;
-  for (const record of historyRecords(history)) {
-    if (String(record?.task?.submit_id || "") === submitId) return record;
+function findHistoryRecord(history: unknown, submitId: string | undefined, historyId?: string): Record<string, any> | undefined {
+  const records = historyRecords(history);
+  if (submitId) {
+    const matched = records.find((record) => String(record?.task?.submit_id || "") === submitId);
+    if (matched) return matched;
   }
-  return undefined;
+  if (historyId) {
+    const matched = records.find((record) => usableAgentId(record?.history_record_id) === historyId || usableAgentId(record?.id) === historyId);
+    if (matched) return matched;
+  }
+  return records.length === 1 ? records[0] : undefined;
 }
 
 function historyRecords(history: unknown): Array<Record<string, any>> {
@@ -288,7 +350,5 @@ function httpsImageUrls(record: Record<string, any>): string[] {
 }
 
 function sanitizedHistoryFailure(record: Record<string, any>): string {
-  return String(record.fail_code) === "2038"
-    ? "即梦内容审核未通过，请调整素材或提示词"
-    : `即梦生成失败（${String(record.fail_code || "unknown").replace(/[^\w-]/g, "").slice(0, 40)}）`;
+  return publicJimengFailure(record);
 }

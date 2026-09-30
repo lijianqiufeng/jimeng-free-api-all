@@ -105,8 +105,8 @@ function readRow(id: string) {
   return database.prepare("SELECT * FROM agent_upscale_tasks WHERE id = ?").get(id) as any;
 }
 
-function fakeRequest({ authorization, body, id, method = "POST" }: { authorization?: string; body?: unknown; id?: string; method?: string } = {}) {
-  return { method, headers: { authorization }, body, params: { id } } as any;
+function fakeRequest({ authorization, body, id, method = "POST", accountId }: { authorization?: string; body?: unknown; id?: string; method?: string; accountId?: string } = {}) {
+  return { method, headers: { authorization, "x-jimeng-account-id": accountId }, body, params: { id } } as any;
 }
 
 function managedRequest(body?: unknown, id?: string) {
@@ -156,6 +156,22 @@ test("route preserves controller status codes", async () => {
   assert.equal((await routes.post[""](managedRequest(input))).statusCode, 202);
   assert.equal((await routes.get["/:id"](managedRequest(undefined, input.id))).statusCode, 200);
   assert.equal((await routes.delete["/:id"](managedRequest(undefined, input.id))).statusCode, 200);
+});
+
+test("upscale POST uses the leased account requested by the canvas", async () => {
+  const pinned = accountPool.create({ name: "upscale route pinned", sessionId: "session-route-pinned" });
+  accountPool.grantLease(managed.apiKey.id, pinned.id);
+  const id = "upscale_route_pinned_123";
+  const response = await routes.post[""](fakeRequest({ authorization, body: { ...input, id }, accountId: pinned.id }));
+  assert.equal(response.statusCode, 202);
+  assert.equal(readRow(id).account_id, pinned.id);
+  await until(() => readRow(id)?.status === "succeeded");
+
+  const unleased = accountPool.create({ name: "upscale route unleased", sessionId: "session-route-unleased" });
+  const rejectedId = "upscale_route_unleased_12";
+  const rejected = await routes.post[""](fakeRequest({ authorization, body: { ...input, id: rejectedId }, accountId: unleased.id }));
+  assertSafeCreateError(rejected);
+  assert.equal(readRow(rejectedId), undefined);
 });
 
 test("malformed JSON fields return one safe HTTP 400", async () => {

@@ -25,8 +25,9 @@ export default {
         })().finally(() => { refreshing = undefined; });
       }
       return {
-        accounts: accountPool.list().map(({ id, enabled, cooldownUntil, status }) => ({
+        accounts: accountPool.list().map(({ id, name, enabled, cooldownUntil, status }) => ({
           id,
+          name,
           enabled,
           cooldownUntil,
           status: {
@@ -42,7 +43,7 @@ export default {
     },
     "/status": async (request: Request) => {
       request.validate("headers.authorization", (value) => typeof value === "string");
-      const credential = await resolveAuthorization(request.headers.authorization, request.headers["x-jimeng-account-id"]);
+      const credential = await resolveAuthorization(request.headers.authorization, request.headers["x-jimeng-account-id"], request.headers["x-jimeng-model"]);
       try {
         if (credential.accountId) {
           const account = await accountPool.refreshStatus(credential.accountId);

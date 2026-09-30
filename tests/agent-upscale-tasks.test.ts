@@ -15,15 +15,26 @@ const SOURCE_SIGNED_URL = "https://fixture.invalid/original.webp";
 const RESULT_URL = "https://fixture.invalid/result-8k.webp";
 
 let agentConversationSubmissions = 0;
+let workspaceCreations = 0;
+let paidConversationIds: string[] = [];
 let observedAccountIds: string[] = [];
 let paidPostTimeout = false;
 let conversationRet = "0";
 let hangStreams = false;
+let streamHistoryId = false;
+let holdHistory = false;
+let historyAborted = false;
+let hangingStreams: PassThrough[] = [];
 let hangSubscribeHandshake = false;
+let hangConversationHandshake: Promise<void> | null = null;
+let hangConversationBody = false;
+let subscribeCalls = 0;
 let subscribeThrow = false;
 let historyRet = "0";
 let uploads = 0;
+let imageByUriMode: "ok" | "empty" | "nested" = "ok";
 let lastConversationId = "";
+let lastPaidPrompt = "";
 let rowAtPaidPost: any = null;
 let inspectTaskId = "";
 let historyIdLookups: string[][] = [];
@@ -83,13 +94,29 @@ axios.defaults.adapter = async (config) => {
   if (url.includes("/mweb/v1/workspace/list")) {
     return ok({ workspaces: [] });
   }
+  if (url.includes("/mweb/v1/get_asset_list")) return ok({ asset_list: [] });
   if (url.includes("/mweb/v1/workspace/create")) {
+    workspaceCreations++;
     const session = cookieSession(config);
     return ok({ workspace_id: session.replace(/^session-/, "workspace-account-") });
   }
   if (url.includes("/mweb/v1/get_image_by_uri")) {
     uploads++;
     recordAccount(config);
+    if (imageByUriMode === "empty") return ok({ uri2image: {} });
+    if (imageByUriMode === "nested") {
+      return ok({
+        data: {
+          uri2image: {
+            "tos-upload-test~tplv": {
+              url: SOURCE_SIGNED_URL,
+              image_width: 768,
+              image_height: 1024,
+            },
+          },
+        },
+      });
+    }
     return ok({
       uri2image: {
         "tos-upload-test": {
@@ -108,28 +135,43 @@ axios.defaults.adapter = async (config) => {
     agentConversationSubmissions++;
     recordAccount(config);
     lastConversationId = String(body(config).conversation_id || "");
+    paidConversationIds.push(lastConversationId);
+    lastPaidPrompt = String(body(config).messages?.[0]?.content?.content_parts?.[1]?.text || "");
     if (inspectTaskId) rowAtPaidPost = readRow(inspectTaskId);
+    if (hangConversationHandshake) await hangConversationHandshake;
     if (paidPostTimeout) throw Object.assign(Error("timeout"), { code: "ETIMEDOUT" });
     if (conversationRet === "4013") {
       throw Object.assign(Error("[请求失败]: 生成失败，疑似存在异常行为 private-token-not-for-client (错误码: 4013)"));
     }
     const stream = new PassThrough();
-    if (hangStreams) return { data: stream, status: 200, statusText: "OK", headers: {}, config };
+    if (hangStreams || hangConversationBody) {
+      if (hangStreams) hangingStreams.push(stream);
+      return { data: stream, status: 200, statusText: "OK", headers: {}, config };
+    }
     stream.end(fs.readFileSync("tests/fixtures/agent-8k-success.sse"));
     return { data: stream, status: 200, statusText: "OK", headers: {}, config };
   }
   if (url.includes("/creation_agent/v2/subscribe_session")) {
+    subscribeCalls++;
     if (subscribeThrow) throw Object.assign(Error("HTTP 401 Unauthorized"));
     if (hangSubscribeHandshake) await new Promise((resolve) => setTimeout(resolve, 2000));
     recordAccount(config);
     const stream = new PassThrough();
-    if (hangStreams) return { data: stream, status: 200, statusText: "OK", headers: {}, config };
+    if (hangStreams) {
+      hangingStreams.push(stream);
+      if (streamHistoryId) queueMicrotask(() => stream.write(subscribeSse()));
+      return { data: stream, status: 200, statusText: "OK", headers: {}, config };
+    }
     queueMicrotask(() => stream.end(subscribeSse()));
     return { data: stream, status: 200, statusText: "OK", headers: {}, config };
   }
   if (url.includes("/get_history_by_ids")) {
     const ids = body(config).history_ids;
     historyIdLookups.push(Array.isArray(ids) ? ids.map(String) : []);
+    if (holdHistory) await new Promise((_, reject) => config.signal?.addEventListener?.("abort", () => {
+      historyAborted = true;
+      reject(Object.assign(Error("canceled"), { code: "ERR_CANCELED" }));
+    }));
     if (historyRet === "1015") return { data: { ret: "1015", errmsg: "登录失效" }, status: 200, statusText: "OK", headers: {}, config };
     const history = JSON.parse(fs.readFileSync("tests/fixtures/agent-8k-history-success.json", "utf8"));
     return ok(history);
@@ -163,15 +205,26 @@ function isolateAccount(sessionId: string) {
 
 function resetNetwork() {
   agentConversationSubmissions = 0;
+  workspaceCreations = 0;
+  paidConversationIds = [];
   observedAccountIds = [];
   paidPostTimeout = false;
   conversationRet = "0";
   hangStreams = false;
+  streamHistoryId = false;
+  holdHistory = false;
+  historyAborted = false;
+  hangingStreams = [];
   hangSubscribeHandshake = false;
+  hangConversationHandshake = null;
+  hangConversationBody = false;
+  subscribeCalls = 0;
   subscribeThrow = false;
   historyRet = "0";
   uploads = 0;
+  imageByUriMode = "ok";
   lastConversationId = "";
+  lastPaidPrompt = "";
   rowAtPaidPost = null;
   inspectTaskId = "";
   historyIdLookups = [];
@@ -208,32 +261,64 @@ describe("agent upscale tasks", { concurrency: 1 }, () => {
 test("strict upscale input accepts one safe image only", () => {
   const valid = upscaleTaskInput({ id: "upscale_test_1234567890", image: "data:image/png;base64,YQ==" });
   assert.equal(valid.id, "upscale_test_1234567890");
+  assert.equal(valid.resolution, "8k");
+  assert.equal(upscaleTaskInput({ ...valid, resolution: "4k" }).resolution, "4k");
+  assert.throws(() => upscaleTaskInput({ ...valid, resolution: "2k" }));
   assert.throws(() => upscaleTaskInput({ ...valid, image: "file:///etc/passwd" }));
   assert.throws(() => upscaleTaskInput({ ...valid, image: "https://127.0.0.1/a.png" }));
+});
+
+test("custom detail survives storage and idempotent requests without a second paid POST", async () => {
+  resetNetwork(); isolateAccount("session-detail");
+  const payload = { ...input, id: "upscale_detail_123456789", detailStrength: 0 };
+  const first = await createUpscaleTask(owner, authorization, payload); assert.equal(first.status, 202);
+  await until(() => readStatus(payload.id) === "succeeded", 8000);
+  assert.equal(lastPaidPrompt, "帮我8k高清放大，细节生成程度0");
+  assert.equal(readRow(payload.id).detail_strength, 0);
+  assert.equal((await createUpscaleTask(owner, authorization, payload)).status, 200);
+  assert.equal((await createUpscaleTask(owner, authorization, { ...payload, detailStrength: 100 })).status, 409);
+  assert.equal(agentConversationSubmissions, 1);
+  for (const detailStrength of [-1, 101, 1.5, "50", null]) assert.throws(() => upscaleTaskInput({ ...payload, detailStrength }));
+});
+
+test("separate generations reuse an account workspace with independent task conversations", async () => {
+  resetNetwork(); isolateAccount("session-workspace-reuse");
+  const first = { ...input, id: "upscale_reuse_first_123456" };
+  const second = { ...input, id: "upscale_reuse_second_123456", resolution: "4k" };
+  await createUpscaleTask(owner, authorization, first);
+  await until(() => readStatus(first.id) === "succeeded", 8000);
+  const workspaceId = readRow(first.id).workspace_id;
+  await createUpscaleTask(owner, authorization, second);
+  await until(() => readStatus(second.id) === "succeeded", 8000);
+  assert.equal(readRow(second.id).workspace_id, workspaceId);
+  assert.equal(workspaceCreations, 1);
+  assert.equal(agentConversationSubmissions, 2);
+  assert.equal(new Set(paidConversationIds).size, 2);
 });
 
 test("duplicate POST never sends another paid Agent conversation", async () => {
   resetNetwork();
   isolateAccount("session-duplicate");
-  const first = await createUpscaleTask(owner, authorization, input);
+  const payload = { ...input, id: "upscale_dup_12345678901" };
+  const first = await createUpscaleTask(owner, authorization, payload);
   assert.equal(first.status, 202);
-  await until(() => ["running", "succeeded", "failed"].includes(String(readStatus(input.id))));
-  const second = await createUpscaleTask(owner, authorization, input);
+  await until(() => ["running", "succeeded", "failed"].includes(String(readStatus(payload.id))), 8000);
+  const second = await createUpscaleTask(owner, authorization, { ...payload, resolution: "8k" });
   assert.equal(second.status, 200);
   assert.equal(agentConversationSubmissions, 1);
-  await until(() => readStatus(input.id) === "succeeded");
+  await until(() => readStatus(payload.id) === "succeeded", 8000);
   assert.equal(agentConversationSubmissions, 1);
-  const row = readRow(input.id);
+  const row = readRow(payload.id);
   assert.equal(row.credential, "");
   assert.equal(row.reference_item_id, "");
   assert.equal(row.reference_uri, "tos-upload-test");
-  const result = await queryUpscaleTask(owner, input.id);
+  const result = await queryUpscaleTask(owner, payload.id);
   assert.equal(result.body.status, "succeeded");
   assert.equal(result.body.providerLabel, "8K");
   assert.equal(result.body.creditsUsed, 4);
   assert.equal(result.body.data[0].url, RESULT_URL);
-  assert.equal((await queryUpscaleTask(otherOwner, input.id)).status, 404);
-  assert.equal((await createUpscaleTask(owner, authorization, { ...input, image: "data:image/jpeg;base64,Yg==" })).status, 409);
+  assert.equal((await queryUpscaleTask(otherOwner, payload.id)).status, 404);
+  assert.equal((await createUpscaleTask(owner, authorization, { ...payload, image: "data:image/jpeg;base64,Yg==" })).status, 409);
   assertPublicBodySafe(first, row);
   assertPublicBodySafe(second, row);
   assertPublicBodySafe(result, row);
@@ -259,17 +344,107 @@ test("one task keeps one account through upload, conversation and subscription",
   assert.equal(readRow("upscale_pinned_1234567890").account_id, pinnedAccount.id);
 });
 
+test("empty get_image_by_uri surfaces the parse error and does not start a paid conversation", async () => {
+  resetNetwork();
+  isolateAccount("session-parse");
+  imageByUriMode = "empty";
+  const id = "upscale_parse_1234567890";
+  await createUpscaleTask(owner, authorization, { ...input, id });
+  await until(() => readStatus(id) === "failed", 20000);
+  assert.equal(agentConversationSubmissions, 0);
+  const result = await queryUpscaleTask(owner, id);
+  assert.equal(result.body.error, "即梦参考图信息解析失败");
+  assert.equal(readRow(id).reference_uri, "");
+  assertPublicBodySafe(result, readRow(id));
+});
+
+test("nested get_image_by_uri still reaches paid conversation", async () => {
+  resetNetwork();
+  isolateAccount("session-nested");
+  imageByUriMode = "nested";
+  const id = "upscale_nested_1234567890";
+  await createUpscaleTask(owner, authorization, { ...input, id });
+  await until(() => ["running", "succeeded"].includes(String(readStatus(id))));
+  assert.equal(agentConversationSubmissions, 1);
+  assert.equal(readRow(id).reference_uri, "tos-upload-test");
+});
+
+test("empty get_image_by_uri with a real PNG still does not start a paid conversation", async () => {
+  resetNetwork();
+  isolateAccount("session-local-png");
+  imageByUriMode = "empty";
+  const id = "upscale_localpng_12345678";
+  const image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  await createUpscaleTask(owner, authorization, { ...input, id, image });
+  await until(() => readStatus(id) === "failed", 20000);
+  assert.equal(agentConversationSubmissions, 0);
+  const result = await queryUpscaleTask(owner, id);
+  assert.equal(result.body.error, "即梦参考图信息解析失败");
+});
+
+test("open conversation stream still finishes when subscribe returns the history id", async () => {
+  resetNetwork();
+  isolateAccount("session-open-stream");
+  hangConversationBody = true;
+  const id = "upscale_open_stream_1234";
+  try {
+    await createUpscaleTask(owner, authorization, { ...input, id });
+    await until(() => readStatus(id) === "succeeded", 8000);
+    assert.equal(agentConversationSubmissions, 1);
+    assert.ok(subscribeCalls >= 1);
+    assert.deepEqual(historyIdLookups[0], ["history-test-001"]);
+  } finally {
+    hangConversationBody = false;
+  }
+});
+
+test("history polling completes while both SSE streams stay open, without a browser refresh or paid retry", async () => {
+  resetNetwork();
+  isolateAccount("session-history-parallel");
+  hangStreams = true;
+  streamHistoryId = true;
+  const id = "upscale_history_parallel_1";
+  try {
+    await createUpscaleTask(owner, authorization, { ...input, id });
+    await until(() => hangingStreams.length === 2);
+    assert.ok(hangingStreams.every((stream) => !stream.destroyed));
+    await until(() => readStatus(id) === "succeeded", 4000);
+    assert.equal(agentConversationSubmissions, 1);
+    assert.deepEqual(historyIdLookups, [["history-test-001"]]);
+    assert.equal((await queryUpscaleTask(owner, id)).body.data[0].url, RESULT_URL);
+    await until(() => hangingStreams.every((stream) => stream.destroyed));
+  } finally {
+    cancelUpscaleTask(owner, id);
+  }
+});
+
+test("cancel aborts an independent history read and never revives the task", async () => {
+  resetNetwork();
+  isolateAccount("session-history-cancel");
+  hangStreams = true;
+  streamHistoryId = true;
+  holdHistory = true;
+  const id = "upscale_history_cancel_12";
+  await createUpscaleTask(owner, authorization, { ...input, id });
+  await until(() => historyIdLookups.length === 1);
+  cancelUpscaleTask(owner, id);
+  await until(() => historyAborted && hangingStreams.every((stream) => stream.destroyed));
+  assert.equal(readStatus(id), "canceled");
+  assert.equal(historyIdLookups.length, 1);
+  assert.equal(agentConversationSubmissions, 1);
+});
+
 test("ambiguous paid POST is not replayed", async () => {
   resetNetwork();
   isolateAccount("session-ambiguous");
   paidPostTimeout = true;
   try {
     await createUpscaleTask(owner, authorization, { ...input, id: "upscale_ambiguous_123456" });
-    await until(() => readStatus("upscale_ambiguous_123456") === "failed");
+    await until(() => readStatus("upscale_ambiguous_123456") === "succeeded", 8000);
     assert.equal(agentConversationSubmissions, 1);
     const result = await queryUpscaleTask(owner, "upscale_ambiguous_123456");
-    assert.equal(result.body.error, "提交结果未确认；为避免重复扣积分未自动重提");
-    assert.match(String(result.body.error), /未确认/);
+    assert.equal(result.body.status, "succeeded");
+    assert.ok(subscribeCalls >= 1);
     assert.equal(readRow("upscale_ambiguous_123456").credential, "");
     assert.equal((await createUpscaleTask(owner, authorization, { ...input, id: "upscale_ambiguous_123456" })).status, 200);
     assert.equal(agentConversationSubmissions, 1);
@@ -365,6 +540,26 @@ test("query at deadline returns without waiting for subscribe", async () => {
   }
 });
 
+test("query during paid POST does not promote or subscribe", async () => {
+  resetNetwork();
+  isolateAccount("session-inflight-query");
+  let release: () => void = () => {};
+  hangConversationHandshake = new Promise((resolve) => { release = resolve; });
+  const id = "upscale_inflight_query_12";
+  try {
+    await createUpscaleTask(owner, authorization, { ...input, id });
+    await until(() => agentConversationSubmissions === 1);
+    const result = await queryUpscaleTask(owner, id);
+    assert.equal(result.status, 200);
+    assert.equal(readStatus(id), "submitting");
+    assert.equal(subscribeCalls, 0);
+  } finally {
+    release();
+    hangConversationHandshake = null;
+  }
+  await until(() => ["running", "succeeded", "failed"].includes(String(readStatus(id))));
+});
+
 test("conversation_id is persisted before the paid POST and restart does not replay it", async () => {
   resetNetwork();
   isolateAccount("session-before-post");
@@ -374,6 +569,7 @@ test("conversation_id is persisted before the paid POST and restart does not rep
   await until(() => agentConversationSubmissions === 1);
   assert.ok(rowAtPaidPost?.conversation_id);
   assert.equal(rowAtPaidPost.conversation_id, lastConversationId);
+  assert.ok(rowAtPaidPost.paid_started_at > 0);
 
   const restartId = "upscale_restart_ro_12345";
   const account = isolateAccount("session-restart-ro");
@@ -394,32 +590,80 @@ test("conversation_id is persisted before the paid POST and restart does not rep
   assert.equal(agentConversationSubmissions, before);
 });
 
-test("query after deadline still fail-closes when subscribe throws", async () => {
+test("query after deadline fails closed without opening a new subscription", async () => {
   resetNetwork();
   const account = isolateAccount("session-deadline-throw");
-  subscribeThrow = true;
-  try {
-    const id = "upscale_deadline_throw_12";
-    const fingerprint = crypto.createHash("sha256").update(JSON.stringify({ id, image: input.image })).digest("hex");
-    database.prepare(`INSERT INTO agent_upscale_tasks (
+  const id = "upscale_deadline_throw_12";
+  const fingerprint = crypto.createHash("sha256").update(JSON.stringify({ id, image: input.image })).digest("hex");
+  database.prepare(`INSERT INTO agent_upscale_tasks (
       id, owner, fingerprint, status, account_id, credential, workspace_id, conversation_id, deadline
     ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)`).run(
-      id, owner, fingerprint, account.id, encrypt("session-deadline-throw"), "workspace-account-deadline-throw",
-      "conv-deadline-throw-1", Date.now() - 1,
-    );
-    const started = Date.now();
-    const result = await queryUpscaleTask(owner, id);
-    assert.ok(Date.now() - started < 400);
-    assert.equal(result.status, 200);
-    await until(() => readStatus(id) === "failed");
-    const row = readRow(id);
-    assert.equal(row.credential, "");
-    assert.match(String(row.error), /超时|未确认|401/);
-    assert.ok(Date.parse(accountPool.get(account.id).cooldownUntil || "") > Date.now());
-    assertPublicBodySafe(result, row);
+    id, owner, fingerprint, account.id, encrypt("session-deadline-throw"), "workspace-account-deadline-throw",
+    "conv-deadline-throw-1", Date.now() - 1,
+  );
+  const started = Date.now();
+  const result = await queryUpscaleTask(owner, id);
+  assert.ok(Date.now() - started < 400);
+  assert.equal(result.status, 200);
+  await until(() => readStatus(id) === "failed");
+  const row = readRow(id);
+  assert.equal(row.credential, "");
+  assert.match(String(row.error), /超时|未确认|401/);
+  assert.equal(subscribeCalls, 0);
+  assert.equal(accountPool.get(account.id).cooldownUntil || "", "");
+  assertPublicBodySafe(result, row);
+});
+
+test("canceling a running task closes its paid and subscription streams", async () => {
+  resetNetwork();
+  isolateAccount("session-cancel-streams");
+  hangStreams = true;
+  const id = "upscale_cancel_streams_123";
+  try {
+    await createUpscaleTask(owner, authorization, { ...input, id });
+    await until(() => readStatus(id) === "running" && hangingStreams.length === 2);
+    assert.equal(cancelUpscaleTask(owner, id).body.status, "canceled");
+    await until(() => hangingStreams.every((stream) => stream.destroyed), 3000);
+    assert.equal(agentConversationSubmissions, 1);
   } finally {
-    subscribeThrow = false;
+    hangStreams = false;
   }
+});
+
+test("conversation without a provider id stops after 10 minutes without another paid POST", async () => {
+  resetNetwork();
+  const account = isolateAccount("session-no-progress");
+  const id = "upscale_no_progress_12345";
+  const fingerprint = crypto.createHash("sha256").update(JSON.stringify({ id, image: input.image })).digest("hex");
+  database.prepare(`INSERT INTO agent_upscale_tasks (
+    id, owner, fingerprint, status, account_id, credential, workspace_id, conversation_id, paid_started_at, deadline
+  ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)`).run(
+    id, owner, fingerprint, account.id, encrypt("session-no-progress"), "workspace-account-no-progress",
+    "conv-no-progress-1", Date.now() - 10 * 60_000 - 1, Date.now() + 40 * 60_000,
+  );
+  const result = await queryUpscaleTask(owner, id);
+  assert.equal(result.status, 200);
+  await until(() => readStatus(id) === "failed");
+  assert.match(String(readRow(id).error), /10分钟/);
+  assert.equal(readRow(id).credential, "");
+  assert.equal(subscribeCalls, 0);
+  assert.equal(agentConversationSubmissions, 0);
+});
+
+test("4K task persists its mode and cannot reuse the same ID as 8K", async () => {
+  resetNetwork();
+  isolateAccount("session-4k");
+  const payload = { ...input, id: "upscale_4k_task_123456", resolution: "4k" };
+  const first = await createUpscaleTask(owner, authorization, payload);
+  assert.equal(first.status, 202);
+  assert.equal(first.body.resolution, "4k");
+  await until(() => agentConversationSubmissions === 1);
+  assert.equal(lastPaidPrompt, "帮我4k高清放大");
+  assert.equal(readRow(payload.id).resolution, "4k");
+  assert.equal((await createUpscaleTask(owner, authorization, payload)).status, 200);
+  assert.equal((await createUpscaleTask(owner, authorization, { ...payload, resolution: "8k" })).status, 409);
+  assert.equal(agentConversationSubmissions, 1);
+  await until(() => readStatus(payload.id) === "succeeded", 8000);
 });
 
 test("submitting row past deadline without conversation is fail-closed without a paid POST", async () => {

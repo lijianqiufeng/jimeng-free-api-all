@@ -303,12 +303,13 @@ Content-Type: application/json</div>
       </section>
 
       <section id="tab-upscale" class="tab-content">
-        <div class="section-heading"><div><h2>智能高清</h2><p>提交一张原图，服务端固定使用即梦 Agent 自动模式和提示词「帮我8k高清放大」。成功标签为上游标记 8K。</p></div></div>
+        <div class="section-heading"><div><h2>智能高清</h2><p>提交一张原图，选择即梦 Agent 4K 或 8K。界面显示上游返回的清晰度标签；最终像素以下载文件为准。</p></div></div>
         <div class="image-test-layout">
           <div class="form-card image-test-form">
             <h3>任务参数</h3>
             <p>API Key 通过 <code>Authorization: Bearer jm_...</code> 发送，仅保存在当前浏览器会话。提示词由服务端固定，不可覆盖。</p>
             <div class="form-group"><label for="upscale-api-key">API Key</label><div class="api-key-row"><input id="upscale-api-key" type="password" autocomplete="off" placeholder="jm_..." /><button class="btn btn-secondary" type="button" onclick="toggleUpscaleKey()">显示</button></div></div>
+            <div class="form-group"><label for="upscale-resolution">目标清晰度</label><select id="upscale-resolution"><option value="8k">8K</option><option value="4k">4K</option></select></div>
             <div class="test-help">还没有 Key？<button type="button" onclick="activateTab('keys'); openKeyModal();">去创建一个测试 Key</button>；创建后会自动填入本页。</div>
             <div class="form-group">
               <label for="upscale-file">原图</label>
@@ -320,6 +321,7 @@ Content-Type: application/json</div>
               </div>
             </div>
             <button id="upscale-submit" class="btn btn-primary btn-full" type="button" onclick="startUpscale()">开始智能高清</button>
+            <button class="btn btn-secondary btn-full" type="button" onclick="forgetUpscaleTask()">清除本地任务记录</button>
             <div class="request-preview">POST /v1/upscale/tasks
 Authorization: Bearer jm_xxx
 Content-Type: application/json</div>
@@ -329,7 +331,7 @@ Content-Type: application/json</div>
             <div class="panel-body">
               <div id="upscale-status" class="test-status"></div>
               <div id="upscale-compare-wrap" class="hidden">
-                <div class="upscale-compare-labels"><span>原图</span><span id="upscale-provider-label">上游标记 8K</span><span>即梦增强图</span></div>
+                <div class="upscale-compare-labels"><span>原图</span><span id="upscale-provider-label">上游标记</span><span>即梦增强图</span></div>
                 <div id="upscale-compare" class="upscale-compare">
                   <img id="upscale-before-img" alt="原图" />
                   <div class="upscale-after"><img id="upscale-after-img" alt="即梦增强图" /></div>
@@ -472,11 +474,13 @@ Content-Type: application/json</div>
         const provider = $("upscale-provider-label");
         if (after) after.src = url || "";
         if (enhancedLink) enhancedLink.href = url || "#";
-        if (provider) { provider.textContent = "上游标记 8K"; provider.classList.toggle("hidden", !data.providerLabel); }
+        const upstreamLabel = data.providerLabel === "4K" || data.providerLabel === "8K" ? data.providerLabel : "";
+        if (provider) { provider.textContent = "上游标记 " + upstreamLabel; provider.classList.toggle("hidden", !upstreamLabel); }
         const wrap = $("upscale-compare-wrap");
         if (wrap) wrap.classList.remove("hidden");
         setUpscaleComparison(50);
-        setUpscaleStatus("success", data.providerLabel ? "处理完成（上游标记 8K）" : "处理完成");
+        const requestedLabel = data.resolution === "4k" ? "4K" : "8K";
+        setUpscaleStatus("success", upstreamLabel ? "处理完成（上游标记 " + upstreamLabel + "）" : "处理完成（请求 " + requestedLabel + "，上游未标记清晰度；请以下载图片像素为准）");
       }
       async function pollUpscale(id) {
         stopUpscalePoll();
@@ -492,8 +496,10 @@ Content-Type: application/json</div>
         }
         lockUpscaleButton();
         const tick = async () => {
+          if (sessionStorage.getItem(UPSCALE_TASK_KEY) !== id) return;
           try {
             const res = await fetch("/v1/upscale/tasks/" + encodeURIComponent(id), { headers: { Authorization: "Bearer " + apiKey } });
+            if (sessionStorage.getItem(UPSCALE_TASK_KEY) !== id) return;
             const data = await res.json().catch(() => ({}));
             if (JimengUpscaleUI.isTerminalStatus(data.status)) {
               if (data.status === "succeeded") await renderUpscaleSuccess(id, data);
@@ -501,11 +507,14 @@ Content-Type: application/json</div>
               unlockUpscaleButton();
               return;
             }
-            setUpscaleStatus("", res.ok ? "智能高清处理中，正在查询同一任务…" : "查询暂时失败，将继续轮询同一任务");
+            const pendingMessage = res.status === 404
+              ? "未查到此任务；请核对 API Key，确认未扣积分后可清除本地记录"
+              : "查询暂时失败，将继续轮询同一任务";
+            setUpscaleStatus("", res.ok ? "智能高清处理中，正在查询同一任务…" : pendingMessage);
           } catch (error) {
             setUpscaleStatus("", "查询暂时失败，将继续轮询同一任务");
           }
-          upscalePollTimer = setTimeout(tick, 5000);
+          if (sessionStorage.getItem(UPSCALE_TASK_KEY) === id) upscalePollTimer = setTimeout(tick, 5000);
         };
         tick();
       }
@@ -514,6 +523,16 @@ Content-Type: application/json</div>
         if (!id) return;
         loadUpscaleKey();
         await pollUpscale(id);
+      }
+      async function forgetUpscaleTask() {
+        const id = sessionStorage.getItem(UPSCALE_TASK_KEY);
+        if (!id) return setUpscaleStatus("", "当前没有待查询的本地任务");
+        if (!confirm("清除后将无法从此页面继续查询旧任务。旧任务可能仍在即梦运行并扣积分，请先确认任务状态。确定清除本地记录吗？")) return;
+        stopUpscalePoll();
+        sessionStorage.removeItem(UPSCALE_TASK_KEY);
+        try { await JimengUpscaleUI.deleteOriginal(id); } catch (e) { console.error(e); }
+        unlockUpscaleButton();
+        setUpscaleStatus("", "本地任务记录已清除；旧任务不会因此取消");
       }
       async function startUpscale() {
         const apiKey = upscaleApiKey();
@@ -533,21 +552,24 @@ Content-Type: application/json</div>
               await pollUpscale(existing);
               return;
             }
-            if (res.status === 404) sessionStorage.removeItem(UPSCALE_TASK_KEY);
-            else if (res.status === 401 || res.status === 403) {
+            if (res.status === 401 || res.status === 403) {
               setUpscaleStatus("error", apiError(data, "API Key 无效"));
               unlockUpscaleButton();
+              return;
             } else if (!res.ok) {
-              setUpscaleStatus("", "无法确认旧任务");
+              setUpscaleStatus("", "无法确认旧任务，请核对 API Key 并重试查询；不会创建新任务");
               unlockUpscaleButton();
+              return;
             }
           } catch (error) {
-            setUpscaleStatus("", "无法确认旧任务");
+            setUpscaleStatus("", "无法确认旧任务，请稍后重试查询；不会创建新任务");
             unlockUpscaleButton();
+            return;
           }
         }
         const file = upscaleSelectedFile || ($("upscale-file") && $("upscale-file").files && $("upscale-file").files[0]);
         if (!file) return showToast("请先选择原图");
+        const resolution = $("upscale-resolution") && $("upscale-resolution").value === "4k" ? "4k" : "8k";
         lockUpscaleButton();
         const wrap = $("upscale-compare-wrap");
         if (wrap) wrap.classList.add("hidden");
@@ -557,21 +579,29 @@ Content-Type: application/json</div>
           const image = await fileToDataUrl(file);
           createdId = JimengUpscaleUI.createTaskId();
           await JimengUpscaleUI.putOriginal(createdId, file);
-          const res = await fetch("/v1/upscale/tasks", { method: "POST", headers: { Authorization: "Bearer " + apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ id: createdId, image }) });
+          sessionStorage.setItem(UPSCALE_TASK_KEY, createdId);
+          const res = await fetch("/v1/upscale/tasks", { method: "POST", headers: { Authorization: "Bearer " + apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ id: createdId, image, resolution }) });
           const data = await res.json().catch(() => ({}));
           if (res.status !== 200 && res.status !== 202) {
-            try { await JimengUpscaleUI.deleteOriginal(createdId); } catch (e) { console.error(e); }
+            if ([400, 401, 403, 413].includes(res.status)) {
+              sessionStorage.removeItem(UPSCALE_TASK_KEY);
+              try { await JimengUpscaleUI.deleteOriginal(createdId); } catch (e) { console.error(e); }
+            }
             throw new Error(apiError(data, "请求失败（HTTP " + res.status + "）"));
           }
-          sessionStorage.setItem(UPSCALE_TASK_KEY, createdId);
           setUpscaleOriginal(file);
           await pollUpscale(createdId);
         } catch (error) {
           if (createdId && sessionStorage.getItem(UPSCALE_TASK_KEY) !== createdId) {
             try { await JimengUpscaleUI.deleteOriginal(createdId); } catch (e) { console.error(e); }
           }
-          unlockUpscaleButton();
-          setUpscaleStatus("error", (error && error.message) || "提交失败");
+          if (createdId && sessionStorage.getItem(UPSCALE_TASK_KEY) === createdId) {
+            setUpscaleStatus("", "提交结果未确认，正在查询同一任务；不会重新提交");
+            await pollUpscale(createdId);
+          } else {
+            unlockUpscaleButton();
+            setUpscaleStatus("error", (error && error.message) || "提交失败");
+          }
         }
       }
 

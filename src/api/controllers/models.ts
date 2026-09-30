@@ -487,6 +487,8 @@ function inferImageResolutions(modelReqKey: string, staticConfig?: JimengModelCo
 }
 
 function inferVideoResolutions(staticConfig?: JimengModelConfig, candidate?: any) {
+  const options = candidate?.options?.find((option: any) => option.key === "resolution")?.enum_val?.string_value;
+  if (Array.isArray(options) && options.length) return options.filter((value: unknown) => typeof value === "string" && /^(480p|720p|1080p|4k)$/.test(value));
   const preferred = collectPreferredResolutions(candidate);
   const sorted = sortVideoResolutions(preferred);
   if (sorted.length > 0) return sorted;
@@ -512,6 +514,13 @@ function collectBenefitTypes(value: any, out: string[] = [], seen = new Set<any>
 
 function collectVideoBenefits(candidate: any, resolutions: string[], staticConfig?: JimengModelConfig) {
   const benefits: Record<string, string> = { ...(staticConfig?.benefits || {}) };
+  const prices = candidate?.commercial_config?.resolution_price_configs;
+  if (Array.isArray(prices)) {
+    for (const price of prices) {
+      if (resolutions.includes(price.resolution) && typeof price.price?.benefit_type === "string") benefits[price.resolution] = price.price.benefit_type;
+    }
+    return benefits;
+  }
   const benefitTypes = collectBenefitTypes(candidate);
 
   for (const benefitType of benefitTypes) {
@@ -591,6 +600,8 @@ function parseVideoModel(candidate: any): JimengModelConfig | null {
     modelReqKey;
   const supportedResolutions = inferVideoResolutions(staticConfig, candidate);
   const benefits = collectVideoBenefits(candidate, supportedResolutions, staticConfig);
+  const frames = candidate.options?.find((option: any) => option.key === "frames")?.enum_val?.int_value;
+  const durations = Array.isArray(frames) ? frames.filter((value: unknown) => typeof value === "number" && value > 0 && value % 24 === 0).map((value: number) => value / 24) : undefined;
 
   return {
     ...(staticConfig || {}),
@@ -607,6 +618,7 @@ function parseVideoModel(candidate: any): JimengModelConfig | null {
       (supportedResolutions.includes("720p") ? "720p" : supportedResolutions[0] || "720p"),
     supportedResolutions,
     benefits,
+    ...(durations?.length ? { supportedDurations: durations, defaultDuration: durations[0] } : {}),
     defaultBenefit:
       benefits[supportedResolutions[0]] ||
       Object.values(benefits)[0] ||

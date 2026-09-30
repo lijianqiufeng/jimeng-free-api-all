@@ -6,6 +6,7 @@ import { generateVideoWithRetry, DEFAULT_MODEL } from '@/api/controllers/videos.
 import { markCredentialFailure, markCredentialSuccess, resolveAuthorization } from '@/api/controllers/auth.ts';
 import util from '@/lib/util.ts';
 import db from '@/lib/database.ts';
+import { SEEDANCE_MODELS } from '@/api/controllers/seedance-contract.ts';
 
 function appendUploadedPaths(value: any, target: string[]) {
     if (!value) return;
@@ -24,6 +25,7 @@ export default {
     post: {
 
         '/generations': async (request: Request) => {
+            if (Object.hasOwn(SEEDANCE_MODELS, request.body?.model)) throw new Error('这四个即梦视频模型请使用 /v1/tasks 持久化任务接口，避免断线重提或自动降级');
             request
                 .validate('body.model', v => _.isUndefined(v) || _.isString(v))
                 .validate('body.prompt', _.isString)
@@ -36,7 +38,7 @@ export default {
 
             // refresh_token切分
             // 随机挑选一个refresh_token
-            const credential = await resolveAuthorization(request.headers.authorization);
+            const credential = await resolveAuthorization(request.headers.authorization, undefined, request.body.model || DEFAULT_MODEL);
             const token = credential.token;
             const statsKey = credential.managedKey || token;
 

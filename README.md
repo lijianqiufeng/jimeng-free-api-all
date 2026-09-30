@@ -15,13 +15,19 @@
 
 ## 更新日志
 
+### 当前工作区：四视频模型异步接入（未部署）
+
+- 为无限画布加入 Seedance 2.5、2.0 Mini、2.0 Fast VIP、2.0 VIP 的 `/v1/tasks` 路径，固定账号、请求与历史编号，查询和恢复不重发付费请求。
+- 支持顺序图片、视频、音频参考与模型参数校验；普通权益不混入样片/长视频计费。四型号及其别名不再通过旧视频/聊天路径自动降级重试。
+- 只完成离线专项与回归，用户已撤回 400 积分测试授权并暂停部署；未真实生成，真实上传兼容、出片和风控结果尚未验证。接口与限制见 [API 文档](API.md#画布四视频模型异步任务未部署)。
+
 ### 2026-09-02（v1.2.6）
 
 - **支持多张图像参考图**：`/v1/images/generations` 支持 `filePath` 数组、`filePaths` 数组及 multipart 多文件上传；参考图按上传顺序传递给即梦，所有来源合计最多 10 张。
 - **修复便携版账号池密钥**：`portable/config/portable.env` 中的 `JIMENG_ACCOUNT_POOL_KEY` 或 `ACCOUNT_POOL_ENCRYPTION_KEY` 会在启动时传入服务进程，可正常配置账号池。
 - **修复 Seedance 2.0 模型路由**：普通 `Seedance 2.0` 与 `2.0 Fast` 不再误用 VIP Vision 通道；VIP 模型改为显式的 `jimeng-video-seedance-2.0-vip` 和 `jimeng-video-seedance-2.0-fast-vip`。
 - **完善 Seedance 2.0 时长支持**：2.0 系列默认生成 5 秒视频，支持 4~15 秒整数时长，并按模型能力做降级重试；日志会记录实际模型与计费类型。
-- **图像生成数量可控**：`n` 支持 1~8，默认 1 张，生成数量会透传至即梦并按请求数量返回。
+- **图像生成数量可控**：`n` 支持 1~8，默认 1 张；接口等待所选数量齐全，不会自动点击即梦网页的“继续生成”。画布批量生成会分别提交独立的单张任务。
 - **升级运行时兼容性**：项目与 Windows 便携包统一使用 Node.js 22+，匹配 `better-sqlite3` 13 的原生模块要求。
 
 ### 2026-08-09
@@ -107,7 +113,7 @@
 | **📝 实时日志** | 实时查看系统运行日志，支持按 `INFO` / `WARN` / `ERROR` 级别筛选，支持自动刷新和一键清理/导出日志文件。    |
 | **🖼️ 媒体回溯** | 所有生成的图片和视频都会自动记录在媒体库中，支持按类型（图片/视频）筛选，点击即可预览高清原图或播放视频。 |
 | **💳 积分追踪** | **[NEW]** 每次请求自动计算并记录消耗积分，实时更新 Token 的剩余积分，精准掌握额度使用情况。               |
-| **✨ 智能高清** | 独立「智能高清」页：提交一张 PNG/JPEG/WebP 原图；成功后以可拖动分割线对比**原图**与**即梦增强图**，并显示「上游标记 8K」。实际像素未经独立验证。 |
+| **✨ 智能高清** | 独立「智能高清」页：提交一张 PNG/JPEG/WebP 原图，可选 4K 或 8K；成功后以可拖动分割线对比**原图**与**即梦增强图**。页面仅在上游明确提供分辨率标签时显示标签。 |
 
 ### 🚀 访问地址
 
@@ -128,10 +134,11 @@
 ### ✨ Agent 智能高清
 
 - **异步任务**：`POST` / `GET` / `DELETE` `/v1/upscale/tasks`，仅接受管理端 `jm_` API Key，不接受即梦 Session ID。
-- **固定 Agent 模式**：服务端固定提示词「帮我8k高清放大」与自动模式，调用方不能覆盖提示词，也不会降级到 4K `super_resolution`。
+- **固定 Agent 模式**：默认 8K，可用 `resolution: "4k"` 选择 4K；服务端分别固定提示词「帮我8k高清放大」和「帮我4k高清放大」，调用方不能覆盖提示词，也不会降级到普通 `super_resolution`。
 - **单图 data URL**：只接受一张 PNG/JPEG/WebP data URL，解码后不超过 25MB；不接受文件路径、`file:` URL 或 HTTP URL。
-- **上游标记 8K**：成功以即梦返回的 8K 标签为准，**不独立验证实际像素**。`providerLabel` 仅在上游明确给出时填写。
+- **结果与标签**：成功以即梦返回的结果图地址为准；`providerLabel` 仅在上游明确给出时填写。单次真实验收取得 4K 4466×2160、8K 8192×8192 的 PNG，具体输出像素以每张下载图为准。
 - **失败不兜底**：不自动重提、不换账号、不改走普通 4K。
+- **无结果超时**：上游明确报错立即失败；已提交会话若 20 分钟仍无任务编号或结果则停止等待，已有任务编号的生成仍按 60 分钟总上限等待。超时和手动停止都不撤销即梦可能已接收的生成。
 
 ### 📐 智能比例检测
 
@@ -318,7 +325,7 @@ Authorization: Bearer sessionid_1,sessionid_2,sessionid_3
 
 **POST** `/v1/upscale/tasks` · **GET** `/v1/upscale/tasks/:id` · **DELETE** `/v1/upscale/tasks/:id`
 
-仅接受 `jm_` Key 与单张 PNG/JPEG/WebP data URL（解码后 ≤25MB）。提示词由服务端固定。成功为**上游标记 8K**，实际像素未经独立验证。详见 [API.md](API.md) §5.9。
+仅接受 `jm_` Key 与单张 PNG/JPEG/WebP data URL（解码后 ≤25MB）。可选 4K 或 8K，默认 8K；提示词由服务端固定。详见 [API.md](API.md) §5.9。
 
 ---
 
@@ -326,7 +333,7 @@ Authorization: Bearer sessionid_1,sessionid_2,sessionid_3
 
 1. **服务稳定性**：本项目基于逆向 API 开发，不保证永久可用。建议优先使用 [即梦官方服务](https://jimeng.jianying.com/)。
 2. **非官方接口**：当前社区会话路径不是火山引擎官方 API，也不是官方 OpenAPI。请勿将其表述为火山引擎或即梦官方接口。
-3. **8K 标签边界**：Agent 智能高清的成功标签为「上游标记 8K」，实际像素未经独立验证。
+3. **分辨率边界**：`resolution` 表示请求模式，`providerLabel` 仅表示上游明确给出的标签；实际像素应读取下载图片，不能仅凭模式或标签推断。
 4. **非盈利性质**：本项目仅供个人研究交流学习，不接受任何形式的捐助，不用于商业用途。
 5. **使用规范**：请遵守相关法律法规，禁止生成违规内容。任何因使用本项目产生的后果由使用者自行承担。
 
@@ -345,3 +352,7 @@ The account pool is available through `/account-pool`. It stores multiple Jimeng
 When a managed API key is sent in `Authorization: Bearer jm_...`, the service selects an enabled Jimeng account automatically. Direct Jimeng session tokens remain supported for backward compatibility on image/video/chat routes. `/v1/upscale/tasks` accepts managed `jm_` keys only.
 
 `GET /v1/account/status` returns the selected account's cached/refreshed membership and credit status without exposing its cookie.
+
+### 高级账号与 5.0 Pro
+
+账号池名称以 `_高级` 结尾（忽略末尾空格）的账号不参与 `jimeng-image-5.0-pro` / `high_aes_general_v50p_large` 新任务分配。自动轮转会跳过，显式指定会返回明确错误；新建或改名后立即生效。没有合格普通账号时不会回退消耗高级账号。Lite、4.7、4K/8K 高清和视频仍按原规则选择，已有任务继续使用原账号查询。API Key 数量无需与账号数量对应。

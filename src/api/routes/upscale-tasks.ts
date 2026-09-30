@@ -9,7 +9,7 @@ async function handle(request: Request, create: boolean) {
   if (!auth?.valid || !auth.apiKeyId) return new Response({ error: "API Key 无效" }, { statusCode: 401 });
   if (create) {
     try {
-      const result = await createUpscaleTask(auth.apiKeyId, request.headers.authorization, request.body);
+      const result = await createUpscaleTask(auth.apiKeyId, request.headers.authorization, request.body, request.headers["x-jimeng-account-id"]);
       return new Response(result.body, { statusCode: result.status });
     } catch {
       return new Response({ error: "智能高清参数无效或暂无可用账号，请检查原图与账号状态" }, { statusCode: 400 });

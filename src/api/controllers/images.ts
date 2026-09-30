@@ -194,6 +194,7 @@ export async function generateImages(
     n = 1,
     onSubmitted,
     beforeSubmit,
+    markSubmitted,
   }: {
     ratio?: string;
     resolution?: string;
@@ -204,6 +205,7 @@ export async function generateImages(
     n?: number; // 生成张数 (1-8)
     onSubmitted?: (historyId: string) => void;
     beforeSubmit?: () => void;
+    markSubmitted?: () => void;
   },
   refreshToken: string
 ) {
@@ -272,7 +274,8 @@ export async function generateImages(
   // 这里简化：如果 ratio 参数在 RATIO_VALUES 中且不是 detect 出来的（这里无法区分），直接用。
   // 妥协：优先使用 ratio 参数，除非 ratio 是 "custom" 或者空。
 
-  let validRatio = ratio;
+  const intelligentRatio = ratio === "auto";
+  let validRatio = intelligentRatio ? "1:1" : ratio;
   if (!RATIO_VALUES.hasOwnProperty(validRatio)) {
     validRatio = "1:1";
   }
@@ -280,7 +283,7 @@ export async function generateImages(
   // 如果 prompt 里检测到且 ratio 是默认 "1:1" (可能是未传)，则覆盖。
   // 这里的风险是用户真的想 1:1 但 prompt 里有 "16:9"。
   // 鉴于这是一个 "Chat" driven API often，prompt detection is feature.
-  if (!onSubmitted && detectedRatioKey && validRatio === "1:1") {
+  if (!onSubmitted && !intelligentRatio && detectedRatioKey && validRatio === "1:1") {
     validRatio = detectedRatioKey;
   }
 
@@ -292,7 +295,7 @@ export async function generateImages(
   logger.info(`\n🎨 ════════════════════ 图像生成任务 ════════════════════`);
   logger.info(`   📦 模型: ${modelName}`);
   logger.info(`   🔗 映射: ${model}`);
-  logger.info(`   📏 尺寸: ${finalWidth}x${finalHeight} (${validRatio})`);
+  logger.info(`   📏 尺寸: ${finalWidth}x${finalHeight} (${intelligentRatio ? "智能比例" : validRatio})`);
   logger.info(`   🔍 分辨率: ${resolutionType.toUpperCase()} | 精细度: ${sampleStrength}`);
   logger.info(`   🎯 模式: ${hasReferenceImages ? `混合(${uploadIDs.length} 张参考图)` : "文生图"}`);
   logger.info(`═══════════════════════════════════════════════════════════\n`);
@@ -313,14 +316,15 @@ export async function generateImages(
       blend: {
         type: "",
         id: util.uuid(),
+        ...(uploadIDs.length > 1 ? { min_version: "3.2.9" } : {}),
         min_features: [],
         core_param: {
           type: "",
           id: util.uuid(),
           model,
-          prompt: prompt + "##",
+          prompt: uploadIDs.length > 1 ? `${"##".repeat(uploadIDs.length)}${prompt}` : prompt + "##",
           sample_strength: sampleStrength,
-          image_ratio: imageRatio,
+          ...(intelligentRatio ? { intelligent_ratio: true } : { image_ratio: imageRatio }),
           large_image_info: {
             type: "",
             id: util.uuid(),
@@ -329,38 +333,34 @@ export async function generateImages(
             resolution_type: resolutionType,
           },
         },
-        ability_list: [
-          {
-            type: "",
+        ability_list: uploadIDs.map((uploadID) => ({
+          type: "",
+          id: util.uuid(),
+          name: "byte_edit",
+          image_uri_list: [uploadID],
+          image_list: [{
+            type: "image",
             id: util.uuid(),
-            name: "byte_edit",
-            image_uri_list: uploadIDs,
-            image_list: uploadIDs.map((uploadID) => ({
-                type: "image",
-                id: util.uuid(),
-                source_from: "upload",
-                platform_type: 1,
-                name: "",
-                image_uri: uploadID,
-                width: 0,
-                height: 0,
-                format: "",
-                uri: uploadID,
-            })),
-            strength: 0.5,
-          },
-        ],
+            source_from: "upload",
+            platform_type: 1,
+            name: "",
+            image_uri: uploadID,
+            width: 0,
+            height: 0,
+            format: "",
+            uri: uploadID,
+          }],
+          strength: 0.5,
+        })),
         history_option: {
           type: "",
           id: util.uuid(),
         },
-        prompt_placeholder_info_list: [
-          {
-            type: "",
-            id: util.uuid(),
-            ability_index: 0,
-          },
-        ],
+        prompt_placeholder_info_list: uploadIDs.map((_, abilityIndex) => ({
+          type: "",
+          id: util.uuid(),
+          ability_index: abilityIndex,
+        })),
         postedit_param: {
           type: "",
           id: util.uuid(),
@@ -390,7 +390,7 @@ export async function generateImages(
           negative_prompt: negativePrompt,
           seed: Math.floor(Math.random() * 100000000) + 2500000000,
           sample_strength: sampleStrength,
-          image_ratio: imageRatio,
+          ...(intelligentRatio ? { intelligent_ratio: true } : { image_ratio: imageRatio }),
           large_image_info: {
             type: "",
             id: util.uuid(),
@@ -452,10 +452,10 @@ export async function generateImages(
     draft_content: JSON.stringify({
       type: "draft",
       id: util.uuid(),
-      min_version: MIN_VERSION,
+      min_version: uploadIDs.length > 1 ? "3.2.9" : MIN_VERSION,
       min_features: [],
       is_from_tsn: true,
-      version: DRAFT_CONTENT_VERSION,
+      version: uploadIDs.length > 1 ? DRAFT_VERSION : DRAFT_CONTENT_VERSION,
       main_component_id: componentId,
       component_list: [
         {
@@ -501,6 +501,7 @@ export async function generateImages(
   const historyId = aigc_data.history_record_id;
   if (!historyId)
     throw new APIException(EX.API_IMAGE_GENERATION_FAILED, "记录ID不存在");
+  markSubmitted?.();
   if (onSubmitted) { onSubmitted(String(historyId)); return []; }
 
   // 状态码说明：
@@ -518,10 +519,13 @@ export async function generateImages(
     item_list = [];
   let retryCount = 0;
   const MAX_POLL_RETRIES = 120; // 最多轮询120次
+  const resultUrls = () => (Array.isArray(item_list) ? item_list : []).map((item) =>
+    item?.image?.large_images?.[0]?.image_url || null
+  ).filter((url): url is string => typeof url === "string" && /^https:\/\//i.test(url));
 
   while (
     PROCESSING_STATES.includes(status) &&
-    (!item_list || item_list.length === 0) &&
+    resultUrls().length < n &&
     retryCount < MAX_POLL_RETRIES
   ) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -641,19 +645,16 @@ export async function generateImages(
     }
   }
 
-  if (retryCount >= MAX_POLL_RETRIES) {
-    throw new APIException(EX.API_IMAGE_GENERATION_FAILED, "图像生成超时");
-  }
-
   if (status === FAIL_STATE) {
     if (failCode === "2038") throw new APIException(EX.API_CONTENT_FILTERED);
     else throw new APIException(EX.API_IMAGE_GENERATION_FAILED);
   }
-  return item_list.map((item) => {
-    if (!item?.image?.large_images?.[0]?.image_url)
-      return item?.common_attr?.cover_url || null;
-    return item.image.large_images[0].image_url;
-  }).slice(0, n);
+  if (retryCount >= MAX_POLL_RETRIES && resultUrls().length < n) {
+    throw new APIException(EX.API_IMAGE_GENERATION_FAILED, "图像生成超时");
+  }
+  const urls = resultUrls();
+  if (urls.length < n) throw new APIException(EX.API_IMAGE_GENERATION_FAILED, `即梦仅完成 ${urls.length}/${n} 张，未自动再次提交生成`);
+  return urls.slice(0, n);
 }
 
 /**
@@ -686,14 +687,17 @@ export async function generateImagesWithRetry(
   );
 
   while (currentResIndex < resolutionLevels.length) {
+    let submitted = false;
     try {
       const currentOptions = {
         ...options,
         resolution: resolutionLevels[currentResIndex],
+        markSubmitted: () => { submitted = true; },
       };
       logger.info(`尝试生成图像，分辨率: ${currentOptions.resolution}`);
       return await generateImages(_model, prompt, currentOptions, refreshToken);
     } catch (error) {
+      if (submitted) throw error;
       // 检查是否为积分不足错误 (fail_code 2039/1006 或包含积分不足关键词)
       const isInsufficientCredits =
         error.code === EX.API_IMAGE_GENERATION_INSUFFICIENT_POINTS[0] ||

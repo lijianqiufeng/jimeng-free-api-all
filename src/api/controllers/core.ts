@@ -220,7 +220,9 @@ export async function request(
     }
     catch (error) {
       lastError = error;
-      logger.error(`请求失败 (尝试 ${retries + 1}/${maxRetries + 1})`);
+      const safeCode = typeof error?.code === "string" && /^[A-Z0-9_]{1,40}$/.test(error.code) ? error.code : "unknown";
+      const status = Number(error?.response?.status);
+      logger.error(`请求失败 (尝试 ${retries + 1}/${maxRetries + 1}) code=${safeCode} status=${Number.isInteger(status) ? status : "-"}`);
 
       // 如果是网络错误或超时，尝试重试
       if ((error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT' ||
@@ -349,7 +351,7 @@ export async function uploadFile(
     throw new APIException(EX.API_REQUEST_FAILED, '获取上传凭证失败，账号可能已掉线');
   }
 
-  logger.info('获取上传令牌成功');
+  logger.info(`获取上传令牌成功 fields=${Object.keys(uploadAuth).filter((key) => !/key|token|secret|session/i.test(key)).slice(0, 12).join("/") || "none"}`);
 
   // 计算文件CRC32 - 注意：需要转换为无符号整数再转十六进制
   // crc-32 包返回有符号整数，需要 >>> 0 转换为无符号
@@ -451,12 +453,20 @@ export async function uploadFile(
     throw new APIException(EX.API_REQUEST_FAILED, commitImg.data['Response ']['Error']['Message']);
   }
 
-  const imageUri = commitImg.data.Result.Results[0].Uri;
-  logger.info("文件上传成功");
+  const result = commitImg.data?.Result || {};
+  const imageUri = result.Results?.[0]?.Uri;
+  const plugin = result.PluginResult?.[0] || result.ImageInfos?.[0] || {};
+  const width = Number(plugin.ImageWidth ?? plugin.Width);
+  const height = Number(plugin.ImageHeight ?? plugin.Height);
+  const url = [plugin.ImageUrl, plugin.StoreUri, plugin.Uri].find((value) => typeof value === "string" && /^https?:\/\//i.test(value));
+  logger.info(`文件上传成功 uri=${imageUri ? "yes" : "no"} plugin=${Object.keys(plugin).slice(0, 12).join("/") || "none"} result=${Object.keys(result).slice(0, 12).join("/") || "none"}`);
 
   return {
     image_uri: imageUri,
     uri: imageUri,
+    ...(Number.isFinite(width) && width > 0 ? { width } : {}),
+    ...(Number.isFinite(height) && height > 0 ? { height } : {}),
+    ...(url ? { url } : {}),
   };
 }
 
@@ -550,7 +560,14 @@ async function generateAWSAuthorizationHeader(
 export function checkResult(result: AxiosResponse) {
   const { ret, errmsg, data } = result.data;
   if (!_.isFinite(Number(ret))) return result.data;
-  if (Number(ret) === 0) return data;
+  if (Number(ret) === 0) {
+    if (data == null && result.data && typeof result.data === "object") {
+      const rest = _.omit(result.data, ["ret", "errmsg", "systime", "logid", "data"]);
+      if (Object.keys(rest).length) return rest;
+      logger.warn(`即梦返回空数据 keys=${Object.keys(result.data).slice(0, 12).join("/")}`);
+    }
+    return data;
+  }
   
   // 记录详细的API错误信息
   logger.error(`❌ [API错误] 错误码: ${Number(ret)}`);

@@ -9,9 +9,13 @@ import {
   ensureAgentWorkspace,
   prepareAgentAttachment,
   queryAgentHistory,
+  readAgentImageInfo,
+  readDataUrlDimensions,
+  readWorkspaceId,
   startAgentConversation,
   subscribeAgentWorkspace,
 } from "@/api/controllers/agent-upscale-client.ts";
+import { database } from "@/lib/database.ts";
 
 globalThis.fetch = async () => { throw Error("unmocked network forbidden"); };
 
@@ -36,12 +40,18 @@ let getImageUris: unknown[] = [];
 let auditUriLists: unknown[] = [];
 let conversationPosts = 0;
 let timeoutConversation = false;
+let hangConversationHandshake = false;
+let hangSubscribeHandshake = false;
 let conversationHttpStatus = 200;
 let lastConversation: any;
 let lastSubscribe: any;
 let historyQueries = 0;
 let subscribeBodies: unknown[] = [];
 let subscribePayload = "";
+let imageByUriBodies: unknown[] | undefined;
+let siblingUri2Image = false;
+let lastGetImage: any;
+let workspaceCreateData: unknown | undefined;
 
 function header(config: any, name: string): string {
   const headers = config.headers || {};
@@ -77,6 +87,13 @@ function queryParam(config: any, key: string): string {
   }
 }
 
+function waitForAbort(signal: AbortSignal): Promise<never> {
+  return new Promise((_, reject) => {
+    if (signal.aborted) return reject(Object.assign(Error("canceled"), { code: "ERR_CANCELED" }));
+    signal.addEventListener("abort", () => reject(Object.assign(Error("canceled"), { code: "ERR_CANCELED" })), { once: true });
+  });
+}
+
 axios.defaults.adapter = async (config) => {
   const url = String(config.url);
   const ok = (data: unknown) => ({ data: { ret: "0", data }, status: 200, statusText: "OK", headers: {}, config });
@@ -98,16 +115,36 @@ axios.defaults.adapter = async (config) => {
   }
   if (url.includes("/mweb/v1/workspace/create")) {
     const payload = body(config);
-    if (payload.name !== "CPA 智能高清") throw Error("workspace/create must send the CPA workspace name");
+    if (payload.name !== "图片高清放大") throw Error("workspace/create must send a product-facing name");
     const session = cookieSession(config);
     if (!session) throw Error("workspace/create must run under the selected session");
     workspaceCreateBodies.push({ name: payload.name });
+    if (workspaceCreateData !== undefined) return ok(workspaceCreateData);
     return ok({ workspace_id: session.replace(/^session-/, "workspace-account-") });
   }
   if (url.includes("/mweb/v1/get_image_by_uri")) {
     const uris = body(config).uris;
     if (!Array.isArray(uris) || !uris.includes("tos-upload-test")) throw Error("get_image_by_uri must receive the uploaded URI");
     getImageUris.push(uris);
+    lastGetImage = config;
+    if (siblingUri2Image) {
+      return {
+        data: {
+          ret: "0",
+          errmsg: "success",
+          logid: "log",
+          uri2image: { "tos-upload-test": { image_url: "https://fixture.invalid/original.webp", width: 1536, height: 2752 } },
+        },
+        status: 200,
+        statusText: "OK",
+        headers: {},
+        config,
+      };
+    }
+    if (imageByUriBodies) {
+      if (!imageByUriBodies.length) throw Error("get_image_by_uri exhausted");
+      return ok(imageByUriBodies.shift());
+    }
     return ok({
       uri2image: {
         "tos-upload-test": {
@@ -129,6 +166,7 @@ axios.defaults.adapter = async (config) => {
     conversationPosts++;
     lastConversation = config;
     if (timeoutConversation) throw Object.assign(Error("timeout"), { code: "ETIMEDOUT" });
+    if (hangConversationHandshake) return waitForAbort(config.signal!);
     const stream = new PassThrough();
     stream.end(fs.readFileSync("tests/fixtures/agent-8k-success.sse"));
     if (conversationHttpStatus !== 200) {
@@ -141,6 +179,7 @@ axios.defaults.adapter = async (config) => {
     if (payload.workspace_id == null || payload.workspace_id === "") throw Error("subscribe_session must send workspace_id");
     lastSubscribe = config;
     subscribeBodies.push(payload);
+    if (hangSubscribeHandshake) return waitForAbort(config.signal!);
     const stream = new PassThrough();
     queueMicrotask(() => stream.end(subscribePayload));
     return { data: stream, status: 200, statusText: "OK", headers: {}, config };
@@ -153,17 +192,64 @@ axios.defaults.adapter = async (config) => {
   throw Error("unmocked axios network forbidden");
 };
 
+test("readWorkspaceId skips protobuf default 0", () => {
+  assert.equal(readWorkspaceId({ workspace_id: 0, id: "7471122" }), "7471122");
+  assert.equal(readWorkspaceId({ workspace_id: 0, workspace: { workspace_id: "7471122" } }), "7471122");
+  assert.equal(readWorkspaceId({ workspaces: [{ workspace_id: 0 }, { workspace_id: "7473333" }] }), "7473333");
+  assert.equal(readWorkspaceId({ workspace_id: 0 }), undefined);
+  assert.equal(readWorkspaceId({ workspace_id: "0" }), undefined);
+  assert.equal(readWorkspaceId({ workspace_id: "workspace-account-a" }), "workspace-account-a");
+});
+
+test("workspace create ignores default 0 and uses the real id", async () => {
+  workspaceCreateData = { workspace_id: 0, id: "7471122" };
+  try {
+    assert.equal(await ensureAgentWorkspace("account-create-zero", "session-create-zero"), "7471122");
+  } finally {
+    workspaceCreateData = undefined;
+  }
+});
+
+test("cached workspace id 0 is ignored and recreated", async () => {
+  database.prepare("INSERT OR REPLACE INTO jimeng_agent_sessions(account_id, workspace_id, updated_at) VALUES(?,?,?)")
+    .run("account-zero", "0", Date.now());
+  const id = await ensureAgentWorkspace("account-zero", "session-zero");
+  assert.equal(id, "workspace-account-zero");
+  const cached = await ensureAgentWorkspace("account-zero", "session-zero");
+  assert.equal(cached, id);
+});
+
 test("workspace cache is isolated by account", async () => {
+  workspaceListSessions = [];
+  workspaceCreateBodies = [];
   const a = await ensureAgentWorkspace("account-a", "session-a");
   const b = await ensureAgentWorkspace("account-b", "session-b");
   assert.equal(a, "workspace-account-a");
   assert.equal(b, "workspace-account-b");
   assert.notEqual(a, b);
   assert.deepEqual(workspaceListSessions, ["session-a", "session-b"]);
-  assert.deepEqual(workspaceCreateBodies, [{ name: "CPA 智能高清" }, { name: "CPA 智能高清" }]);
+  assert.deepEqual(workspaceCreateBodies, [{ name: "图片高清放大" }, { name: "图片高清放大" }]);
   const cached = await ensureAgentWorkspace("account-a", "session-a");
   assert.equal(cached, a);
   assert.equal(workspaceListSessions.length, 2);
+});
+
+test("upscale reuses the account workspace without creating another sidebar item", async () => {
+  const before = workspaceCreateBodies.length;
+  workspaceCreateData = { workspace_id: "new-upscale-workspace" };
+  try {
+    assert.equal(await ensureAgentWorkspace("account-a", "session-a"), "workspace-account-a");
+    assert.equal(workspaceCreateBodies.length, before);
+    assert.equal(await ensureAgentWorkspace("account-a", "session-a"), "workspace-account-a");
+  } finally { workspaceCreateData = undefined; }
+});
+
+test("concurrent initialization creates once and raw credentials never share a workspace", async () => {
+  const before = workspaceCreateBodies.length;
+  const ids = await Promise.all([ensureAgentWorkspace("", "session-raw-a"), ensureAgentWorkspace("", "session-raw-a"), ensureAgentWorkspace("", "session-raw-b")]);
+  assert.equal(ids[0], ids[1]);
+  assert.notEqual(ids[0], ids[2]);
+  assert.equal(workspaceCreateBodies.length, before + 2);
 });
 
 test("fresh upload resolves URL and dimensions without inventing item_id", async () => {
@@ -177,6 +263,126 @@ test("fresh upload resolves URL and dimensions without inventing item_id", async
   assert.equal("itemId" in attachment, false);
   assert.deepEqual(getImageUris, [["tos-upload-test"]]);
   assert.deepEqual(auditUriLists, [["tos-upload-test"]]);
+  assert.equal(queryParam(lastGetImage, "da_version"), "3.1.3");
+  assert.equal(body(lastGetImage).image_info, undefined);
+  assert.deepEqual(body(lastGetImage).uris, ["tos-upload-test"]);
+});
+
+test("empty get_image_by_uri data falls back to the image_info request", async () => {
+  getImageUris = [];
+  imageByUriBodies = [undefined, {
+    uri2image: { "tos-upload-test": { image_url: "https://fixture.invalid/original.webp", width: 1536, height: 2752 } },
+  }];
+  try {
+    const attachment = await prepareAgentAttachment("data:image/png;base64,YQ==", "session-a", { attempts: 1, delayMs: 0 });
+    assert.equal(attachment.url, "https://fixture.invalid/original.webp");
+    assert.equal(attachment.width, 1536);
+    assert.equal(body(lastGetImage).image_info.format, "webp");
+    assert.equal(body(lastGetImage).image_info.width, 4096);
+  } finally {
+    imageByUriBodies = undefined;
+  }
+});
+
+test("readAgentImageInfo accepts nested maps, key suffixes and field aliases", () => {
+  const url = "https://fixture.invalid/original.webp";
+  assert.deepEqual(readAgentImageInfo({ data: { uri2image: { "tos-upload-test": { image_url: url, width: 768, height: 1024 } } } }, "tos-upload-test"), { url, width: 768, height: 1024 });
+  assert.deepEqual(readAgentImageInfo({ uri2image: { "tos-upload-test~tplv": { url, image_width: "768", image_height: "1024" } } }, "tos-upload-test"), { url, width: 768, height: 1024 });
+  assert.deepEqual(readAgentImageInfo({ uri2image: { other: { image_url: url, width: 12, height: 34 } } }, "tos-upload-test"), { url, width: 12, height: 34 });
+  assert.deepEqual(readAgentImageInfo({ uri2image: { "tos-upload-test": { image_url: { url }, width: 9, height: 8 } } }, "tos-upload-test"), { url, width: 9, height: 8 });
+  assert.equal(readAgentImageInfo({ uri2image: {} }, "tos-upload-test"), undefined);
+});
+
+test("fresh upload waits for delayed get_image_by_uri metadata", async () => {
+  getImageUris = [];
+  auditUriLists = [];
+  imageByUriBodies = [{ uri2image: {} }, { uri2image: { "tos-upload-test": { image_url: "https://fixture.invalid/original.webp", width: 768, height: 1024 } } }];
+  try {
+    const attachment = await prepareAgentAttachment("data:image/png;base64,YQ==", "session-a", { delayMs: 0 });
+    assert.equal(attachment.url, "https://fixture.invalid/original.webp");
+    assert.equal(getImageUris.length, 2);
+  } finally {
+    imageByUriBodies = undefined;
+  }
+});
+
+test("fresh upload reads nested uri2image when Jimeng wraps the map", async () => {
+  getImageUris = [];
+  imageByUriBodies = [{ data: { uri2image: { "tos-upload-test~tplv": { url: "https://fixture.invalid/original.webp", image_width: 768, image_height: 1024 } } } }];
+  try {
+    const attachment = await prepareAgentAttachment("data:image/png;base64,YQ==", "session-a", { attempts: 1, delayMs: 0 });
+    assert.deepEqual(attachment, {
+      uri: "tos-upload-test",
+      url: "https://fixture.invalid/original.webp",
+      width: 768,
+      height: 1024,
+    });
+  } finally {
+    imageByUriBodies = undefined;
+  }
+});
+
+const PNG_1X1 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+test("get_image_by_uri reads uri2image when Jimeng places it beside ret", async () => {
+  siblingUri2Image = true;
+  try {
+    const attachment = await prepareAgentAttachment(PNG_1X1, "session-a", { attempts: 1, delayMs: 0 });
+    assert.equal(attachment.url, "https://fixture.invalid/original.webp");
+    assert.deepEqual([attachment.width, attachment.height], [1536, 2752]);
+  } finally {
+    siblingUri2Image = false;
+  }
+});
+
+test("zero uri2image dimensions keep the signed URL and use local pixels", async () => {
+  getImageUris = [];
+  imageByUriBodies = [{
+    uri2image: {
+      "tos-cn-i-tb4s082cfz/uploaded": {
+        image_uri: "tos-cn-i-tb4s082cfz/uploaded",
+        image_url: "https://fixture.invalid/original.webp",
+        width: 0,
+        height: 0,
+        format: "webp",
+        smart_crop_loc: null,
+      },
+    },
+  }];
+  try {
+    const info = readAgentImageInfo(imageByUriBodies[0], "tos-upload-test");
+    assert.deepEqual(info, { url: "https://fixture.invalid/original.webp" });
+    const attachment = await prepareAgentAttachment(PNG_1X1, "session-a", { attempts: 1, delayMs: 0 });
+    assert.deepEqual(attachment, {
+      uri: "tos-upload-test",
+      url: "https://fixture.invalid/original.webp",
+      width: 1,
+      height: 1,
+    });
+  } finally {
+    imageByUriBodies = undefined;
+  }
+});
+
+test("empty get_image_by_uri still fails even when local PNG size is known", async () => {
+  getImageUris = [];
+  imageByUriBodies = [{ uri2image: {} }];
+  try {
+    assert.deepEqual(readDataUrlDimensions(PNG_1X1), { width: 1, height: 1 });
+    await assert.rejects(prepareAgentAttachment(PNG_1X1, "session-a", { attempts: 1, delayMs: 0 }), /即梦参考图信息解析失败/);
+  } finally {
+    imageByUriBodies = undefined;
+  }
+});
+
+test("stream consume flushes a final SSE event that has no trailing blank line", async () => {
+  const stream = new PassThrough();
+  const observation = createAgentObservation("conv-flush");
+  const body = `event: message\ndata: ${JSON.stringify({ conversation_id: "conv-flush", data: { submit_id: "submit-flush-001" } })}`;
+  const consuming = consumeAgentStream(stream, observation, Date.now() + 1000);
+  stream.end(body);
+  await consuming;
+  assert.equal(observation.submitId, "submit-flush-001");
 });
 
 test("paid conversation timeout is not automatically retried", async () => {
@@ -187,6 +393,30 @@ test("paid conversation timeout is not automatically retried", async () => {
     assert.equal(conversationPosts, before + 1);
   } finally {
     timeoutConversation = false;
+  }
+});
+
+test("paid and subscription stream handshakes stop at their deadlines", async () => {
+  const before = conversationPosts;
+  hangConversationHandshake = true;
+  try {
+    await assert.rejects(
+      startAgentConversation("session-a", "workspace-account-a", attachmentFixture, "conv-handshake-deadline", Date.now() + 25),
+      (error: any) => error.code === "ETIMEDOUT",
+    );
+    assert.equal(conversationPosts, before + 1);
+  } finally {
+    hangConversationHandshake = false;
+  }
+  hangSubscribeHandshake = true;
+  try {
+    await assert.rejects(
+      subscribeAgentWorkspace("session-a", "workspace-account-a", createAgentObservation("conv-subscribe-deadline"), Date.now() + 25),
+      (error: any) => error.code === "ETIMEDOUT",
+    );
+  } finally {
+    hangSubscribeHandshake = false;
+    subscribeBodies = [];
   }
 });
 
@@ -221,6 +451,12 @@ test("subscribe parses only events for the task conversation", async () => {
     `data: ${JSON.stringify({ type: "conversation_created", conversation_id: "conv-keep", history_record_id: "history-keep" })}`,
     "",
     "event: system",
+    `data: ${JSON.stringify({ payload: { metadata: { conversation_id: "conv-keep" }, history_record_id: "history-nested-keep" } })}`,
+    "",
+    "event: system",
+    `data: ${JSON.stringify({ payload: { metadata: { conversation_id: "conv-other" }, history_record_id: "history-nested-other" } })}`,
+    "",
+    "event: system",
     `data: ${JSON.stringify({ type: "stream_complete", conversation_id: "conv-other" })}`,
     "",
   ].join("\n");
@@ -229,9 +465,45 @@ test("subscribe parses only events for the task conversation", async () => {
   assert.equal(lastSubscribe.timeout, 0);
   assert.equal(header(lastSubscribe, "Accept-Encoding"), "identity");
   assert.deepEqual(subscribeBodies, [{ workspace_id: "workspace-account-a" }]);
-  assert.equal(observation.historyId, "history-keep");
+  assert.equal(observation.historyId, "history-nested-keep");
   assert.equal(observation.complete, false);
   assert.equal(observation.conversationId, "conv-keep");
+});
+
+test("shared workspace ignores unscoped receipts and terminal events", async () => {
+  subscribePayload = [
+    "event: stream_complete",
+    `data: ${JSON.stringify({ success: false, error_code: 3001 })}`,
+    "",
+    "event: system",
+    `data: ${JSON.stringify({ type: "stream_complete", success: false, error_code: 3001 })}`,
+    "",
+    "event: system",
+    `data: ${JSON.stringify({ type: "conversation_created", conversation_id: "conv-keep", history_record_id: "history-keep" })}`,
+    "",
+    "event: system",
+    `data: ${JSON.stringify({ history_record_id: "history-unscoped", submit_id: "submit-unscoped" })}`,
+    "",
+  ].join("\n");
+  const observation = createAgentObservation("conv-keep");
+  await subscribeAgentWorkspace("session-a", "workspace-account-a", observation, Date.now() + 1000);
+  assert.equal(observation.failed, undefined);
+  assert.equal(observation.historyId, "history-keep");
+});
+
+test("subscribe matches numeric conversation ids", async () => {
+  subscribePayload = [
+    "event: system",
+    `data: ${JSON.stringify({ type: "conversation_created", conversation_id: 19617933949964, history_record_id: 7471122 })}`,
+    "",
+    "event: system",
+    `data: ${JSON.stringify({ type: "stream_complete", conversation_id: 19617933949964 })}`,
+    "",
+  ].join("\n");
+  const observation = createAgentObservation("19617933949964");
+  await subscribeAgentWorkspace("session-a", "workspace-account-a", observation, Date.now() + 1000);
+  assert.equal(observation.historyId, "7471122");
+  assert.equal(observation.conversationId, "19617933949964");
 });
 
 test("history lookup is skipped until a history ID exists", async () => {
@@ -261,7 +533,7 @@ test("stream consume accepts split chunks and stops at the deadline", async () =
   stream.end();
   await consuming;
   assert.equal(observation.submitId, "submit-test-001");
-  assert.equal(observation.complete, true);
+  assert.equal(observation.complete, false);
 
   const hanging = new PassThrough();
   const timedOut = createAgentObservation("conv-deadline");
