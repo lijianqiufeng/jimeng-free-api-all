@@ -17,6 +17,7 @@ import { generateVideo, generateVideoWithRetry } from "@/api/controllers/videos.
 import { checkResult } from "@/api/controllers/core.ts";
 
 let submits = 0, fail = "", draft: any, payload: any, historyStatus = 50, historyCookie = "", fetchFails = false, uploaded = 0, userReads = 0;
+const receipts = new Map<string, string>();
 test("risk diagnostics preserve only the explicit reason and safe upstream trace ID", () => {
   const response = (data: any) => ({ data, status: 200 }) as any;
   assert.throws(() => checkResult(response({ ret: 4013, errmsg: "risk rejected", fail_starling_key: "web_risk_control_message_reject_generation", logid: "202610080123456789ABCDEF" })), (error: any) => error.upstreamCode === 4013 && error.riskReason === "web_risk_control_message_reject_generation" && error.upstreamLogId === "202610080123456789ABCDEF");
@@ -68,8 +69,10 @@ axios.defaults.adapter = async config => {
   if (url.endsWith("/aigc_draft/generate")) {
     submits++; payload = JSON.parse(String(config.data)); draft = JSON.parse(payload.draft_content);
     if (fail === "timeout") throw Object.assign(Error("timeout"), { code: "ETIMEDOUT" });
-    if (fail) return { ...ok({}), data: { ret: fail, errmsg: "private failure" } };
-    return ok({ aigc_data: { history_record_id: `history-${submits}` } });
+    if (fail) return { ...ok({}), data: { ret: fail === "numeric1006" ? 1006 : fail, errmsg: "private failure" } };
+    const prompt = draft.component_list[0].abilities.gen_video.text_to_video_params.video_gen_inputs[0].prompt;
+    const historyId = `history-${submits}`; receipts.set(prompt, historyId);
+    return ok({ aigc_data: { history_record_id: historyId } });
   }
   if (url.endsWith("/get_history_by_ids")) {
     historyCookie = String(config.headers?.Cookie || config.headers?.cookie || "");
@@ -179,18 +182,37 @@ test("all multimodal references must upload, preserving material order", async (
   await assert.rejects(submitSeedanceVideo(seedanceInput({ ...base, references }), "fixed-video-account", { beforeSubmit() {}, onSubmitting() { assert.fail(); }, onSubmitted() { assert.fail(); } }), /参考视频读取失败，未提交生成/);
   fetchFails = false; assert.equal(submits, before);
 });
-test("cancel before POST cannot dispatch; ambiguous errors and 4013 never retry", async () => {
+test("two simultaneous VIP tasks keep independent receipts and terminal results", async () => {
+  const before = submits;
+  const inputs = [1, 2].map(index => ({ ...base, model: "jimeng-video-seedance-2.0-vip", id: `video_concurrent_${index}_1234567890`, prompt: `并行脚本${index}` }));
+  await Promise.all(inputs.map(input => createTask(owner, auth, input)));
+  await Promise.all(inputs.map(input => waitFor(input.id, "running")));
+  assert.equal(submits, before + 2);
+  assert.equal(new Set(inputs.map(input => get(input.id).history_id)).size, 2);
+  for (const input of inputs) assert.equal(get(input.id).history_id, receipts.get(input.prompt));
+  const results = await Promise.all(inputs.map(input => queryTask(owner, input.id)));
+  assert.ok(results.every(result => result.body.status === "succeeded"));
+  await Promise.all(inputs.map(input => createTask(owner, auth, input)));
+  assert.equal(submits, before + 2);
+});
+
+test("cancel before POST cannot dispatch; insufficient credit, ambiguous errors and 4013 never retry", async () => {
   const canceled = "video_cancel_1234567890", before = submits;
   cancelTask(owner, canceled);
   assert.equal((await createTask(owner, auth, { ...base, id: canceled })).status, 409);
   assert.equal(submits, before);
-  for (const failure of ["timeout", "4013"]) {
+  for (const failure of ["1006", "numeric1006", "5000", "timeout", "4013"]) {
     fail = failure; const id = `video_failure_${failure}_1234567890`, input = { ...base, id };
     await createTask(owner, auth, input); await waitFor(id, "failed");
     const count = submits;
     await createTask(owner, auth, input); await queryTask(owner, id);
     assert.equal(submits, count);
     assert.ok(!JSON.stringify((await queryTask(owner, id)).body).includes("private failure"));
+    if (["1006", "numeric1006", "5000"].includes(failure)) {
+      assert.match(get(id).error, /积分不足.*上游已拒绝/);
+      assert.doesNotMatch(get(id).error, /结果未确认/);
+      assert.equal(get(id).history_id, "");
+    }
   }
   fail = "";
 });

@@ -49,7 +49,9 @@ export async function createTask(owner: number, authorization: string, body: unk
     const message = String(error?.message || "");
     const cooldownMs = accountFailureCooldown(error);
     if (credential.accountId && cooldownMs !== null) markFailure(credential.accountId, cooldownMs);
-    const known = /\(错误码: 4013\)$/.test(message)
+    const known = input.kind === "video" && /\(错误码: (?:1006|5000)\)$/.test(message)
+      ? "即梦账号积分不足以生成本次视频（1006）；上游已拒绝，未自动重提，请检查该账号积分或调整生成参数"
+      : /\(错误码: 4013\)$/.test(message)
       ? "即梦安全风控拒绝了本次请求（4013：疑似存在异常行为）；未自动重提，请前往即梦网页检查账号安全验证或联系即梦支持"
       : message.match(/当前即梦模型不支持所选(?:清晰度|时长)，未自动(?:降级|缩短)|^首帧上传失败$|^尾帧上传失败，未提交生成$|^(?:当前账号|当前视频|参考(?:图|视频|音频|音视频))[^\r\n]{0,100}，未提交生成$/)?.[0];
     const fallback = input.kind === "video"

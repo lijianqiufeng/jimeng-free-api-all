@@ -341,7 +341,9 @@ export function selectAccount(strategy: AccountSelectionStrategy = "least_failur
       .all(timestamp) as AccountRow[];
     const paid = requiresPaidCredit(model, video);
     const eligible = rows.filter((row) => accountSupportsModel(row.name, model, video) && (!paid || row.total_credit !== null && row.total_credit >= MIN_PAID_CREDIT));
-    const candidates = strategy === "round_robin" || !eligible.length ? eligible : eligible.filter((row) => row.failure_count === Math.min(...eligible.map((item) => item.failure_count)));
+    // Five credits is an admission floor, not the price of a VIP video.
+    const candidates = video ? eligible.filter((row) => row.total_credit === Math.max(...eligible.map((item) => item.total_credit!)))
+      : strategy === "round_robin" || !eligible.length ? eligible : eligible.filter((row) => row.failure_count === Math.min(...eligible.map((item) => item.failure_count)));
     const equalWeight = !paid || candidates.every((row) => row.total_credit !== null && row.total_credit >= 30);
     const sequence = (db.prepare(`SELECT COALESCE(MAX(selection_seq), 0) + 1 AS value FROM ${TABLE}`).get() as { value: number }).value;
     const weight = (row: AccountRow) => equalWeight ? 1 : 1 + 3 * Math.min(1, Math.max(0, row.total_credit ?? 0) / 30);

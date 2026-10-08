@@ -43,7 +43,7 @@ export async function resolveAuthorization(authorization: string, requestedAccou
     const paid = requiresPaidCredit(model, video);
     if (!requestedAccountId && paid) {
       const available = accountPool.list().filter((a) => a.enabled && accountSupportsModel(a.name, model, video) && (!a.cooldownUntil || Date.parse(a.cooldownUntil) <= Date.now()));
-      if (!available.some((a) => (a.status.totalCredit ?? 0) >= MIN_PAID_CREDIT)) {
+      if (video || !available.some((a) => (a.status.totalCredit ?? 0) >= MIN_PAID_CREDIT)) {
         await Promise.allSettled(available.map((a) => accountPool.refreshStatus(a.id)));
       }
     }

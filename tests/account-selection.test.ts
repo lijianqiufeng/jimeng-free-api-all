@@ -17,7 +17,7 @@ const db = new Database(process.env.DB_PATH);
 pool.setMembershipStatusProvider(undefined);
 axios.defaults.adapter = async (config) => {
   const text = String(config.headers?.Cookie || "");
-  const credit = text.includes("test-session-low") ? 2 : text.includes("test-session-high") ? 28 : 0;
+  const credit = text.includes("video-rich") ? 14686 : text.includes("video-poor") ? 78 : text.includes("test-session-low") ? 2 : text.includes("test-session-high") ? 28 : 0;
   if (!String(config.url).includes("/commerce/v1/benefits/user_credit")) throw Error("Unmocked network");
   return { data: { ret: "0", data: { credit: { gift_credit: credit, purchase_credit: 0, vip_credit: 0 } } }, status: 200, statusText: "OK", headers: {}, config };
 };
@@ -132,4 +132,22 @@ test("all video models use advanced accounts only; existing bindings remain read
   assert.equal((await resolveAuthorization(authorization, undefined, videoModels[0])).accountId, regular.id);
   pool.updateAccount(regular.id, { sessionId: "test-session-low-video" });
   await assert.rejects(resolveAuthorization(authorization, regular.id, videoModels[0], true), /积分不足/);
+});
+
+test("concurrent new VIP videos prefer refreshed credit, preserving explicit bindings and image rotation", async () => {
+  for (const account of pool.listAccounts()) pool.setAccountEnabled(account.id, false);
+  const poor = pool.createAccount({ name: "余额少_高级", sessionId: "video-poor" });
+  const rich = pool.createAccount({ name: "余额足_高级", sessionId: "video-rich" });
+  // Stale cache prefers the wrong account; a new video must refresh before choosing.
+  db.prepare("UPDATE jimeng_accounts SET total_credit=20000 WHERE id=?").run(poor.id);
+  db.prepare("UPDATE jimeng_accounts SET total_credit=5 WHERE id=?").run(rich.id);
+  const { key } = createApiKey("video-credit-selection"), auth = `Bearer ${key}`;
+  const selected = await Promise.all([resolveAuthorization(auth, undefined, "jimeng-video-seedance-2.0-vip", true), resolveAuthorization(auth, undefined, "jimeng-video-seedance-2.0-vip", true)]);
+  assert.deepEqual(selected.map(value => value.accountId), [rich.id, rich.id]);
+  pool.grantAccountLease(validateApiKey(key).apiKeyId!, poor.id);
+  assert.equal((await resolveAuthorization(auth, poor.id, "jimeng-video-seedance-2.0-vip", true)).accountId, poor.id);
+  const images = Array.from({ length: 10 }, () => pool.selectAccount("round_robin", "jimeng-image-4.7").account.id);
+  assert.ok(images.includes(poor.id) && images.includes(rich.id));
+  pool.setAccountEnabled(rich.id, false);
+  assert.equal((await resolveAuthorization(auth, undefined, "jimeng-video-seedance-2.0-vip", true)).accountId, poor.id);
 });

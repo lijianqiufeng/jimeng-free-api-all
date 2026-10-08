@@ -588,8 +588,8 @@ export function checkResult(result: AxiosResponse) {
   logger.error(`❌ [API错误] ${JSON.stringify(diagnostic)}`);
   
   // 即梦积分不足错误码：5000 (旧) 或 1006 (新)
-  if (ret === '5000' || ret === '1006')
-    throw new APIException(EX.API_IMAGE_GENERATION_INSUFFICIENT_POINTS, `[积分不足]: ${errmsg} (错误码: ${ret})`);
+  if ([5000, 1006].includes(Number(ret)))
+    throw Object.assign(new APIException(EX.API_IMAGE_GENERATION_INSUFFICIENT_POINTS, `[积分不足]: ${errmsg} (错误码: ${ret})`), diagnostic);
   throw Object.assign(new APIException(EX.API_REQUEST_FAILED, `[请求失败]: ${errmsg} (错误码: ${ret})`), diagnostic);
 }
 
