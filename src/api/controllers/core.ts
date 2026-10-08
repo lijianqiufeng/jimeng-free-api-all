@@ -569,13 +569,20 @@ export function checkResult(result: AxiosResponse) {
     return data;
   }
   
-  // 记录详细的API错误信息
-  logger.error(`❌ [API错误] 错误码: ${Number(ret)}`);
+  // Only explicit upstream diagnostics; never log raw responses, cookies or URLs.
+  const reason = result.data.fail_starling_key || data?.fail_starling_key;
+  const logId = result.data.logid;
+  const diagnostic = {
+    upstreamCode: Number(ret),
+    ...(/^web_risk_control_[a-z_]{1,100}$/.test(String(reason || "")) ? { riskReason: String(reason) } : {}),
+    ...(/^[a-fA-F0-9]{16,64}$/.test(String(logId || "")) ? { upstreamLogId: String(logId) } : {}),
+  };
+  logger.error(`❌ [API错误] ${JSON.stringify(diagnostic)}`);
   
   // 即梦积分不足错误码：5000 (旧) 或 1006 (新)
   if (ret === '5000' || ret === '1006')
     throw new APIException(EX.API_IMAGE_GENERATION_INSUFFICIENT_POINTS, `[积分不足]: ${errmsg} (错误码: ${ret})`);
-  throw new APIException(EX.API_REQUEST_FAILED, `[请求失败]: ${errmsg} (错误码: ${ret})`);
+  throw Object.assign(new APIException(EX.API_REQUEST_FAILED, `[请求失败]: ${errmsg} (错误码: ${ret})`), diagnostic);
 }
 
 /**

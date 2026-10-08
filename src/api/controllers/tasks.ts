@@ -56,7 +56,7 @@ export async function createTask(owner: number, authorization: string, body: unk
       ? videoSubmissionStarted ? "即梦提交结果未确认；未自动重提，请检查即梦生成记录" : "即梦视频素材准备失败，尚未提交视频生成；请检查参考素材后重试"
       : "即梦提交失败或结果未确认；未自动重提，请检查账号积分、权限和即梦生成记录";
     const code = String(error?.code || error?.cause?.code || /\(错误码: (\d+)\)$/.exec(message)?.[1] || "");
-    if (input.kind === "video") logger.warn(`视频任务失败 ${JSON.stringify({ id: input.id, model: input.model, phase: videoSubmissionStarted ? "submission" : "preparation", code: /^[A-Za-z0-9_.-]{1,60}$/.test(code) ? code : "unknown" })}`);
+    if (input.kind === "video") logger.warn(`视频任务失败 ${JSON.stringify({ id: input.id, model: input.model, phase: videoSubmissionStarted ? "submission" : "preparation", code: Number.isInteger(error?.upstreamCode) ? error.upstreamCode : /^[A-Za-z0-9_.-]{1,60}$/.test(code) ? code : "unknown", ...(/^web_risk_control_[a-z_]{1,100}$/.test(error?.riskReason) ? { riskReason: error.riskReason } : {}), ...(/^[a-fA-F0-9]{16,64}$/.test(error?.upstreamLogId) ? { upstreamLogId: error.upstreamLogId } : {}) })}`);
     database.prepare("UPDATE canvas_tasks SET status = 'failed', credential = '', error = ? WHERE id = ? AND status = 'submitting'").run(known || fallback, input.id);
   });
   return { status: 202, body: publicTask(get(input.id)!) };

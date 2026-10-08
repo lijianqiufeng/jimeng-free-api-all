@@ -14,8 +14,14 @@ import { resolveVideoModelConfig } from "@/api/controllers/models.ts";
 import { submitSeedanceVideo } from "@/api/controllers/seedance.ts";
 import { seedanceInput } from "@/api/controllers/seedance-contract.ts";
 import { generateVideo, generateVideoWithRetry } from "@/api/controllers/videos.ts";
+import { checkResult } from "@/api/controllers/core.ts";
 
 let submits = 0, fail = "", draft: any, payload: any, historyStatus = 50, historyCookie = "", fetchFails = false, uploaded = 0, userReads = 0;
+test("risk diagnostics preserve only the explicit reason and safe upstream trace ID", () => {
+  const response = (data: any) => ({ data, status: 200 }) as any;
+  assert.throws(() => checkResult(response({ ret: 4013, errmsg: "risk rejected", fail_starling_key: "web_risk_control_message_reject_generation", logid: "202610080123456789ABCDEF" })), (error: any) => error.upstreamCode === 4013 && error.riskReason === "web_risk_control_message_reject_generation" && error.upstreamLogId === "202610080123456789ABCDEF");
+  assert.throws(() => checkResult(response({ ret: "4013", errmsg: "risk rejected", fail_starling_key: "https://private.test/token", logid: "cookie=secret" })), (error: any) => error.upstreamCode === 4013 && !error.riskReason && !error.upstreamLogId);
+});
 const vodStages: string[] = [];
 childProcess.execFile = ((_file: string, _args: string[], _options: unknown, callback: Function) => callback(null, JSON.stringify({ format: { duration: 3 }, streams: [{ codec_type: "video", width: 1280, height: 720, avg_frame_rate: "24/1" }, { codec_type: "audio" }] }))) as any;
 globalThis.fetch = async url => {
