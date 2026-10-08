@@ -10,6 +10,7 @@ import { request } from "@/api/controllers/core.ts";
 import { generateImages } from "@/api/controllers/images.ts";
 import { markCredentialFailure, resolveAuthorization } from "@/api/controllers/auth.ts";
 import accountRoutes from "@/api/routes/account-status.ts";
+import { premiumImageBenefits, premiumImageConfig } from "./fixtures/premium-images.ts";
 
 globalThis.fetch = async () => { throw Error("unmocked network forbidden"); };
 let submissions = 0, timeoutSubmission = false, submissionRet = "0", submissionHttpStatus = 200, historyRet = "0", historyStatus = 50;
@@ -22,7 +23,8 @@ axios.defaults.adapter = async (config) => {
   if (url.includes("Action=CommitImageUpload")) return ok({ Result: { Results: [{ Uri: `frame-${uploaded}` }] } });
   let data: any;
   if (url.includes("/get_upload_token?")) data = { access_key_id: "fake", secret_access_key: "fake", session_token: "fake" };
-  else if (url.endsWith("/get_common_config")) data = {};
+  else if (url.endsWith("/get_common_config")) data = premiumImageConfig;
+  else if (url.endsWith("/batch_get_user_benefit")) data = premiumImageBenefits();
   else if (url.endsWith("/user_credit")) data = { credit: { gift_credit: 500, purchase_credit: 0, vip_credit: 0 } };
   else if (url.endsWith("/aigc_draft/generate")) {
     const payload = JSON.parse(String(config.data));
@@ -46,7 +48,8 @@ axios.defaults.adapter = async (config) => {
 const managed = createApiKey("isolated canvas");
 const owner = validateApiKey(managed.key).apiKeyId!;
 const otherManaged = createApiKey("other isolated canvas");
-accountPool.create({ name: "isolated account", sessionId: "fake-account-session" });
+accountPool.create({ name: "isolated account_高级", sessionId: "fake-account-session" });
+accountPool.create({ name: "recovery account_高级", sessionId: "fake-recovery-session" });
 const authorization = `Bearer ${managed.key}`;
 const otherAuthorization = `Bearer ${otherManaged.key}`;
 const boundAccount = accountPool.create({ name: "bound account", sessionId: "bound-account-session" });
@@ -170,7 +173,7 @@ test("query authentication failures cool the pinned account while retaining the 
   assert.ok(Date.parse(accountPool.get(row.account_id).cooldownUntil || "") > Date.now());
 });
 test("HTTP authentication failures cool only the task's pinned account", async () => {
-  accountPool.create({ name: "http auth account", sessionId: "http-auth-account-session" });
+  accountPool.create({ name: "http auth account_高级", sessionId: "http-auth-account-session" });
   submissionHttpStatus = 401;
   try {
     const id = "canvas_http_auth_1234567890";
@@ -190,7 +193,7 @@ test("paid request timeout is not automatically retried", async () => {
   timeoutSubmission = false;
 });
 test("image edits preserve upload order, request one result, and never submit after upload failure", async () => {
-  accountPool.create({ name: "upload account", sessionId: "upload-account-session" });
+  accountPool.create({ name: "upload account_高级", sessionId: "upload-account-session" });
   const before = submissions;
   const edit = { ...input, id: "canvas_images_1234567890", images: ["data:image/png;base64,YQ==", "data:image/png;base64,Yg=="] };
   await createTask(owner, authorization, edit);

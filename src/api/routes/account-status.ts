@@ -1,6 +1,6 @@
 import Request from "@/lib/request/Request.ts";
 
-import { markCredentialFailure, markCredentialSuccess, resolveAuthorization } from "@/api/controllers/auth.ts";
+import { markCredentialFailure, markCredentialSuccess, publicAccountError, resolveAuthorization, type ResolvedCredential } from "@/api/controllers/auth.ts";
 import { getCredit } from "@/api/controllers/core.ts";
 import accountPool from "@/lib/account-pool.ts";
 import { validateApiKey } from "@/lib/database.ts";
@@ -43,8 +43,9 @@ export default {
     },
     "/status": async (request: Request) => {
       request.validate("headers.authorization", (value) => typeof value === "string");
-      const credential = await resolveAuthorization(request.headers.authorization, request.headers["x-jimeng-account-id"], request.headers["x-jimeng-model"]);
+      let credential: ResolvedCredential | undefined;
       try {
+        credential = await resolveAuthorization(request.headers.authorization, request.headers["x-jimeng-account-id"], request.headers["x-jimeng-account-id"] ? "" : request.headers["x-jimeng-model"]);
         if (credential.accountId) {
           const account = await accountPool.refreshStatus(credential.accountId);
           // A read-only balance success must not clear a generation risk cooldown.
@@ -62,7 +63,9 @@ export default {
         markCredentialSuccess(credential);
         return { account: { status: { ...credits, membership: "unknown" } } };
       } catch (error) {
-        markCredentialFailure(credential, error);
+        const message = publicAccountError(error);
+        if (message) return new Response({ error: message }, { statusCode: 400 });
+        if (credential) markCredentialFailure(credential, error);
         throw error;
       }
     },

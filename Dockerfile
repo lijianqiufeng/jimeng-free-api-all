@@ -22,8 +22,8 @@ RUN rm -rf node_modules && npm ci --omit=dev --registry https://registry.npmmirr
 # 最终运行镜像 - 更小的基础镜像
 FROM node:22-alpine
 
-# 安装运行时必需的库（better-sqlite3 需要）
-RUN apk add --no-cache libstdc++
+# 安装 SQLite 运行库及参考音视频原素材 ffprobe
+RUN apk add --no-cache libstdc++ ffmpeg
 
 WORKDIR /app
 

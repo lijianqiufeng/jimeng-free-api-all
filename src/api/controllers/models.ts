@@ -793,6 +793,7 @@ export async function resolveModelConfig(
   if (matched) return matched;
   const staticMatch = getStaticModelConfig(modelIdOrReqKey, type);
   if (staticMatch) return staticMatch;
+  if (type === "image") throw Error("不支持的即梦图片模型，未提交生成");
   return getStaticModelConfig(
     type === "image" ? "jimeng-image-5.0-lite" : "jimeng-video-seedance-2.0",
     type

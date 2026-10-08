@@ -3,6 +3,7 @@ import _ from 'lodash';
 import Request from '@/lib/request/Request.ts';
 import Response from '@/lib/response/Response.ts';
 import { createCompletion, createCompletionStream } from '@/api/controllers/chat.ts';
+import { DEFAULT_MODEL } from '@/api/controllers/images.ts';
 import { markCredentialFailure, markCredentialSuccess, resolveAuthorization } from '@/api/controllers/auth.ts';
 
 export default {
@@ -18,7 +19,8 @@ export default {
                 .validate('headers.authorization', _.isString)
             // refresh_token切分
             // 随机挑选一个refresh_token
-            const credential = await resolveAuthorization(request.headers.authorization);
+            const video = Boolean(request.body.model?.startsWith('jimeng-video'));
+            const credential = await resolveAuthorization(request.headers.authorization, undefined, request.body.model || DEFAULT_MODEL, video, video);
             const token = credential.token;
             const { model, messages, stream } = request.body;
             try {

@@ -11,8 +11,21 @@ const TABLE = "jimeng_accounts";
 export type AccountCredentialKind = "cookie" | "sessionid";
 export type AccountSelectionStrategy = "round_robin" | "least_failures";
 export const MIN_PAID_CREDIT = 5;
-export function accountSupportsModel(name: string, model: string): boolean {
-  return !name.trim().endsWith("_高级") || !["jimeng-image-5.0-pro", "high_aes_general_v50p_large"].includes(model.trim().toLowerCase());
+export function isVideoModel(model: string): boolean {
+  return /^(?:jimeng-video-|seedance-|dreamina_seedance_|dreamina_ic_generate_video_model_)/i.test(model.trim());
+}
+export function isPremiumFreeImageModel(model: string): boolean {
+  return ["jimeng-image-5.0-lite", "high_aes_general_v50", "jimeng-image-4.6", "high_aes_general_v42"].includes(model.trim().toLowerCase().split(":")[0]);
+}
+export function requiresPaidCredit(model: string, video = isVideoModel(model)): boolean {
+  return video || Boolean(model && !isPremiumFreeImageModel(model) && !/lite/i.test(model));
+}
+export function accountModelError(model: string, video = isVideoModel(model)): string {
+  return video ? "视频生成仅使用名称以 _高级 结尾的账号；本次未提交生成" : isPremiumFreeImageModel(model) ? "Lite 和 4.6 免费高速生成仅使用名称以 _高级 结尾的账号；本次未提交生成" : "名称以 _高级 结尾的账号不用于 5.0 Pro；本次未提交生成";
+}
+export function accountSupportsModel(name: string, model: string, video = isVideoModel(model)): boolean {
+  const advanced = name.trim().endsWith("_高级");
+  return video || isPremiumFreeImageModel(model) ? advanced : !advanced || !["jimeng-image-5.0-pro", "high_aes_general_v50p_large"].includes(model.trim().toLowerCase().split(":")[0]);
 }
 
 export interface AccountPoolCreateInput {
@@ -321,19 +334,19 @@ export function setAccountEnabled(id: string, enabled: boolean): PublicAccount {
   return getAccount(id);
 }
 
-export function selectAccount(strategy: AccountSelectionStrategy = "least_failures", model = ""): AccountSelection {
+export function selectAccount(strategy: AccountSelectionStrategy = "least_failures", model = "", video = isVideoModel(model)): AccountSelection {
   const reserve = db.transaction(() => {
     const timestamp = now();
     const rows = db.prepare(`SELECT * FROM ${TABLE} WHERE enabled = 1 AND (cooldown_until IS NULL OR cooldown_until <= ?) ORDER BY selection_seq ASC, id ASC`)
       .all(timestamp) as AccountRow[];
-    const paid = Boolean(model && !/lite/i.test(model));
-    const eligible = rows.filter((row) => accountSupportsModel(row.name, model) && (!paid || row.total_credit !== null && row.total_credit >= MIN_PAID_CREDIT));
+    const paid = requiresPaidCredit(model, video);
+    const eligible = rows.filter((row) => accountSupportsModel(row.name, model, video) && (!paid || row.total_credit !== null && row.total_credit >= MIN_PAID_CREDIT));
     const candidates = strategy === "round_robin" || !eligible.length ? eligible : eligible.filter((row) => row.failure_count === Math.min(...eligible.map((item) => item.failure_count)));
     const equalWeight = !paid || candidates.every((row) => row.total_credit !== null && row.total_credit >= 30);
     const sequence = (db.prepare(`SELECT COALESCE(MAX(selection_seq), 0) + 1 AS value FROM ${TABLE}`).get() as { value: number }).value;
     const weight = (row: AccountRow) => equalWeight ? 1 : 1 + 3 * Math.min(1, Math.max(0, row.total_credit ?? 0) / 30);
     const row = candidates.reduce<AccountRow | undefined>((best, item) => !best || (sequence - item.selection_seq) * weight(item) > (sequence - best.selection_seq) * weight(best) ? item : best, undefined);
-    if (!row) throw new Error(!accountSupportsModel("_高级", model) ? "没有可用于 5.0 Pro 的普通账号；_高级账号保留给其他模型，普通账号须至少 5 积分" : paid ? "没有积分达到 5 的即梦账号；低于 5 积分的账号仅用于 Lite" : "没有可用的即梦账号");
+    if (!row) throw new Error(video ? "没有可用于视频生成的 _高级账号；须启用、未冷却且至少 5 积分，未提交生成" : isPremiumFreeImageModel(model) ? "没有可用于 Lite 和 4.6 免费高速生成的 _高级账号；本次未提交生成" : !accountSupportsModel("_高级", model) ? "没有可用于 5.0 Pro 的普通账号；_高级账号保留给其他模型，普通账号须至少 5 积分" : paid ? "没有积分达到 5 的即梦账号；低于 5 积分的账号仅用于 Lite" : "没有可用的即梦账号");
     db.prepare(`UPDATE ${TABLE} SET selection_seq = ?, last_used_at = ?, updated_at = ? WHERE id = ?`).run(sequence, timestamp, timestamp, row.id);
     return row;
   });
@@ -345,11 +358,11 @@ export function selectAccount(strategy: AccountSelectionStrategy = "least_failur
 }
 
 /** Select one specific enabled account for an already-bound task or status check. */
-export function selectAccountById(id: string, model = ""): AccountSelection {
+export function selectAccountById(id: string, model = "", video = isVideoModel(model)): AccountSelection {
   const row = db.prepare(`SELECT * FROM ${TABLE} WHERE id = ? AND enabled = 1 AND (cooldown_until IS NULL OR cooldown_until <= ?)`)
     .get(id, now()) as AccountRow | undefined;
   if (!row) throw new Error("指定的即梦账号不可用");
-  if (!accountSupportsModel(row.name, model)) throw new Error("名称以 _高级 结尾的账号不用于 5.0 Pro；本次未提交生成");
+  if (!accountSupportsModel(row.name, model, video)) throw new Error(accountModelError(model, video));
   const timestamp = now();
   db.prepare(`UPDATE ${TABLE} SET last_used_at = ?, updated_at = ? WHERE id = ?`).run(timestamp, timestamp, row.id);
   const credential = decrypt(row.credential_ciphertext);

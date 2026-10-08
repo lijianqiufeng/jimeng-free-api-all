@@ -1,7 +1,7 @@
 import _ from "lodash";
 
 import { tokenSplit } from "@/api/controllers/core.ts";
-import accountPool, { accountSupportsModel, MIN_PAID_CREDIT } from "@/lib/account-pool.ts";
+import accountPool, { accountModelError, accountSupportsModel, isPremiumFreeImageModel, isVideoModel, MIN_PAID_CREDIT, requiresPaidCredit } from "@/lib/account-pool.ts";
 import db, { touchApiKey } from "@/lib/database.ts";
 
 export interface ResolvedCredential {
@@ -15,7 +15,20 @@ export function isManagedApiKey(value: string): boolean {
   return /^jm_[A-Za-z0-9_-]{20,}$/.test(value);
 }
 
-export async function resolveAuthorization(authorization: string, requestedAccountId?: string, model = "", requirePaidBalance = false): Promise<ResolvedCredential> {
+export function publicAccountError(error: unknown): string | undefined {
+  const message = error instanceof Error ? error.message : "";
+  return [
+    "没有可用于视频生成的 _高级账号；须启用、未冷却且至少 5 积分，未提交生成",
+    "视频生成仅使用名称以 _高级 结尾的账号；本次未提交生成",
+    "视频生成必须使用托管 API Key 和名称以 _高级 结尾的账号；本次未提交生成",
+    "即梦账号积分不足 5，仅可用于 Lite；本次未提交生成",
+    "Lite 和 4.6 免费高速生成仅使用名称以 _高级 结尾的账号；本次未提交生成",
+    "没有可用于 Lite 和 4.6 免费高速生成的 _高级账号；本次未提交生成",
+    "Lite 和 4.6 免费高速生成必须使用托管 API Key 和名称以 _高级 结尾的账号；本次未提交生成",
+  ].includes(message) ? message : undefined;
+}
+
+export async function resolveAuthorization(authorization: string, requestedAccountId?: string, model = "", requirePaidBalance = false, video = isVideoModel(model)): Promise<ResolvedCredential> {
   const tokens = tokenSplit(authorization);
   if (tokens.length === 0) throw new Error("Authorization token is empty");
 
@@ -27,24 +40,25 @@ export async function resolveAuthorization(authorization: string, requestedAccou
     if (requestedAccountId && !accountPool.hasLease(apiKeyId, requestedAccountId)) {
       throw new Error("该 API Key 没有此账号的有效租约绑定");
     }
-    if (!requestedAccountId && model && !/lite/i.test(model)) {
-      const available = accountPool.list().filter((a) => a.enabled && accountSupportsModel(a.name, model) && (!a.cooldownUntil || Date.parse(a.cooldownUntil) <= Date.now()));
+    const paid = requiresPaidCredit(model, video);
+    if (!requestedAccountId && paid) {
+      const available = accountPool.list().filter((a) => a.enabled && accountSupportsModel(a.name, model, video) && (!a.cooldownUntil || Date.parse(a.cooldownUntil) <= Date.now()));
       if (!available.some((a) => (a.status.totalCredit ?? 0) >= MIN_PAID_CREDIT)) {
         await Promise.allSettled(available.map((a) => accountPool.refreshStatus(a.id)));
       }
     }
-    let selected = requestedAccountId ? accountPool.selectById(requestedAccountId, model) : accountPool.select("round_robin", model);
-    if (requestedAccountId && requirePaidBalance && model && !/lite/i.test(model)) {
+    let selected = requestedAccountId ? accountPool.selectById(requestedAccountId, model, video) : accountPool.select("round_robin", model, video);
+    if (requestedAccountId && requirePaidBalance && paid) {
       const current = await accountPool.refreshStatus(selected.account.id);
-      if (!accountSupportsModel(current.name, model)) throw new Error("名称以 _高级 结尾的账号不用于 5.0 Pro；本次未提交生成");
+      if (!accountSupportsModel(current.name, model, video)) throw new Error(accountModelError(model, video));
       if ((current.status.totalCredit ?? 0) < MIN_PAID_CREDIT) throw new Error("即梦账号积分不足 5，仅可用于 Lite；本次未提交生成");
     }
-    if (!requestedAccountId && model && !/lite/i.test(model)) {
+    if (!requestedAccountId && paid) {
       for (let attempt = 0; attempt < accountPool.list().length; attempt += 1) {
         const current = await accountPool.refreshStatus(selected.account.id);
-        if (accountSupportsModel(current.name, model) && (current.status.totalCredit ?? 0) >= MIN_PAID_CREDIT) break;
+        if (accountSupportsModel(current.name, model, video) && (current.status.totalCredit ?? 0) >= MIN_PAID_CREDIT) break;
         if (attempt === accountPool.list().length - 1) throw new Error("即梦账号积分不足 5，仅可用于 Lite；本次未提交生成");
-        selected = accountPool.select("round_robin", model);
+        selected = accountPool.select("round_robin", model, video);
       }
     }
     if (!requestedAccountId) accountPool.grantLease(apiKeyId, selected.account.id);
@@ -60,6 +74,8 @@ export async function resolveAuthorization(authorization: string, requestedAccou
     throw new Error("API key is invalid or disabled");
   }
 
+  if (video) throw new Error("视频生成必须使用托管 API Key 和名称以 _高级 结尾的账号；本次未提交生成");
+  if (isPremiumFreeImageModel(model)) throw new Error("Lite 和 4.6 免费高速生成必须使用托管 API Key 和名称以 _高级 结尾的账号；本次未提交生成");
   return { token: _.sample(tokens) as string };
 }
 

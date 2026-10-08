@@ -6,6 +6,8 @@ import util from "@/lib/util.ts";
 import { getCredit, receiveCredit, request, uploadFile } from "./core.ts";
 import logger from "@/lib/logger.ts";
 import { JimengModelConfig, resolveImageModelConfig } from "./models.ts";
+import { isPremiumFreeImageModel } from "@/lib/account-pool.ts";
+import { assertPremiumImageEntitlement } from "./image-entitlements.ts";
 
 const DEFAULT_ASSISTANT_ID = 513695;
 export const DEFAULT_MODEL = "jimeng-image-5.0-lite";
@@ -217,6 +219,16 @@ export async function generateImages(
   const hasReferenceImages = referenceImagePaths.length > 0;
   const uploadIDs: string[] = [];
 
+  const modelName = _model;
+  const modelConfig = await resolveImageModelConfig(modelName, refreshToken);
+  const model = modelConfig.modelReqKey || getModel(modelName);
+  let resolutionType = resolution.toLowerCase();
+  if (!modelConfig.supportedResolutions.includes(resolutionType)) {
+    if (onSubmitted || isPremiumFreeImageModel(model)) throw new Error("当前即梦模型不支持所选清晰度，未自动降级");
+    resolutionType = modelConfig.defaultResolution;
+    if (resolution !== resolutionType) logger.warn(`⚠️ [分辨率] ${modelName} 不支持 ${resolution}，已自动调整为 ${resolutionType}`);
+  }
+
   // 如果有参考图，逐张上传并保留顺序，供上游的多图参考字段使用。
   if (hasReferenceImages) {
     logger.info(`🖼️ [参考图] 检测到 ${referenceImagePaths.length} 张参考图 → 混合模式`);
@@ -235,22 +247,6 @@ export async function generateImages(
           `第 ${index + 1} 张参考图上传失败: ${error.message}`
         );
       }
-    }
-  }
-
-  // 使用用户选择的模型（混合模式不再强制3.0）
-  const modelName = _model;
-  const modelConfig = await resolveImageModelConfig(modelName, refreshToken);
-  const model = modelConfig.modelReqKey || getModel(modelName);
-
-  // 解析分辨率和比例
-  let resolutionType = resolution.toLowerCase(); // 用户指定优先
-
-  if (!modelConfig.supportedResolutions.includes(resolutionType)) {
-    if (onSubmitted) throw new Error("当前即梦模型不支持所选清晰度，未自动降级");
-    resolutionType = modelConfig.defaultResolution;
-    if (resolution !== resolutionType) {
-      logger.warn(`⚠️ [分辨率] ${modelName} 不支持 ${resolution}，已自动调整为 ${resolutionType}`);
     }
   }
 
@@ -300,8 +296,10 @@ export async function generateImages(
   logger.info(`   🎯 模式: ${hasReferenceImages ? `混合(${uploadIDs.length} 张参考图)` : "文生图"}`);
   logger.info(`═══════════════════════════════════════════════════════════\n`);
 
-  const { totalCredit } = await getCredit(refreshToken);
-  if (totalCredit <= 0) await receiveCredit(refreshToken);
+  if (!isPremiumFreeImageModel(model)) {
+    const { totalCredit } = await getCredit(refreshToken);
+    if (totalCredit <= 0) await receiveCredit(refreshToken);
+  }
 
   const componentId = util.uuid();
 
@@ -484,6 +482,8 @@ export async function generateImages(
   
   // 输出完整请求数据用于调试
 
+  beforeSubmit?.();
+  await assertPremiumImageEntitlement(modelConfig, resolutionType, refreshToken);
   beforeSubmit?.();
   const { aigc_data } = await request(
     "post",
@@ -676,7 +676,7 @@ export async function generateImagesWithRetry(
   refreshToken: string
 ): Promise<string[]> {
   const modelConfig = await resolveImageModelConfig(_model, refreshToken);
-  const resolutionLevels = getImageResolutionFallbacks(
+  const resolutionLevels = isPremiumFreeImageModel(_model) ? [options.resolution?.toLowerCase() || modelConfig.defaultResolution] : getImageResolutionFallbacks(
     _model,
     options.resolution,
     modelConfig
@@ -697,7 +697,7 @@ export async function generateImagesWithRetry(
       logger.info(`尝试生成图像，分辨率: ${currentOptions.resolution}`);
       return await generateImages(_model, prompt, currentOptions, refreshToken);
     } catch (error) {
-      if (submitted) throw error;
+      if (submitted || isPremiumFreeImageModel(_model)) throw error;
       // 检查是否为积分不足错误 (fail_code 2039/1006 或包含积分不足关键词)
       const isInsufficientCredits =
         error.code === EX.API_IMAGE_GENERATION_INSUFFICIENT_POINTS[0] ||
