@@ -1,0 +1,29 @@
+{
+  "asset_list": [
+    {
+      "agent_conversation_session": {
+        "conversation_session": {
+          "conversation_id": "conversation-original",
+          "mapping": {
+            "0": {
+              "author": {
+                "role": "tool"
+              },
+              "content": {
+                "content_type": "text",
+                "parts": [],
+                "content_parts": [
+                  {
+                    "text": "{\"errmsg\":\"redacted\",\"data\":\"{\\\"ret\\\":\\\"0\\\",\\\"msg\\\":\\\"redacted\\\",\\\"sysTime\\\":\\\"1700000000\\\",\\\"logId\\\":\\\"redacted\\\",\\\"data\\\":{\\\"contents\\\":[{\\\"id\\\":\\\"redacted\\\",\\\"type\\\":\\\"redacted\\\",\\\"resource\\\":{\\\"mimeType\\\":\\\"redacted\\\",\\\"uri\\\":\\\"redacted\\\",\\\"llm_key\\\":\\\"redacted\\\"}}],\\\"history_id\\\":\\\"history-original\\\",\\\"commerce_info\\\":{\\\"credit_count\\\":4,\\\"triplet\\\":null,\\\"triplets\\\":[{\\\"resource_type\\\":\\\"redacted\\\",\\\"resource_id\\\":\\\"redacted\\\",\\\"benefit_type\\\":\\\"redacted\\\"}]},\\\"submit_info\\\":{\\\"code\\\":0,\\\"msg\\\":\\\"redacted\\\"},\\\"submit_id\\\":\\\"submit-original\\\",\\\"ratio\\\":\\\"redacted\\\",\\\"pre_gen_item_ids\\\":[\\\"7000000000000000001\\\"],\\\"forecast_resolution\\\":{\\\"width\\\":6117,\\\"height\\\":8192},\\\"resource_type\\\":\\\"image\\\",\\\"model_key\\\":\\\"redacted\\\"},\\\"msgDetail\\\":\\\"redacted\\\"}\"}"
+                  }
+                ],
+                "reasoning_content": "redacted"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
+

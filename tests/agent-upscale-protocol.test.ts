@@ -110,6 +110,74 @@ test("usableAgentId skips protobuf default 0", () => {
   assert.equal(usableAgentId("0"), undefined);
   assert.equal(usableAgentId(7471122), "7471122");
   assert.equal(usableAgentId("7471122"), "7471122");
+  assert.equal(usableAgentId(7000000000000000001), undefined);
+  assert.equal(usableAgentId("7000000000000000001"), "7000000000000000001");
+});
+
+const originalSession = () => JSON.parse(fs.readFileSync("tests/fixtures/agent-original-history-recovery.json", "utf8"));
+
+test("sanitized original tool receipt repairs history without reference IDs overriding it", () => {
+  const state = createAgentObservation("conversation-original");
+  state.submitId = "submit-original";
+  state.historyId = "history-unrelated";
+  const fixture = originalSession();
+  mergeAgentSession(state, fixture);
+  assert.equal(state.historyId, "history-original");
+  assert.equal(state.submitId, "submit-original");
+  assert.equal(state.creditsUsed, 4);
+  const tool = fixture.asset_list[0].agent_conversation_session.conversation_session.mapping["0"];
+  feedAgentSse(state, `event: message\ndata: ${JSON.stringify({ ...tool, references: [{ history_record_id: "history-unrelated" }] })}\n\n`);
+  feedAgentSse(state, `event: message\ndata: ${JSON.stringify({ author: { role: "assistant" }, content: { history_record_id: "history-unrelated", submit_id: "submit-other" } })}\n\n`);
+  feedAgentSse(state, `event: system\ndata: ${JSON.stringify({ type: "conversation_created", conversation_id: "conversation-original", history_record_id: "history-unrelated" })}\n\n`);
+  assert.equal(state.historyId, "history-original");
+  assert.equal(state.submitId, "submit-original");
+});
+
+test("original session recovery refuses another tool submit or conversation", () => {
+  const state = createAgentObservation("conversation-original");
+  state.submitId = "submit-different";
+  state.historyId = "history-unrelated";
+  mergeAgentSession(state, originalSession());
+  assert.equal(state.historyId, "history-unrelated");
+  assert.equal(state.creditsUsed, undefined);
+  const other = createAgentObservation("conversation-different");
+  mergeAgentSession(other, originalSession());
+  assert.equal(other.submitId, undefined);
+  assert.equal(other.historyId, undefined);
+});
+
+test("conversation_created cannot replace an already bound original conversation", () => {
+  for (const bound of ["submitId", "historyId"] as const) {
+    const state = createAgentObservation("conversation-original");
+    state[bound] = "original-id";
+    feedAgentSse(state, `event: system\ndata: ${JSON.stringify({ type: "conversation_created", conversation_id: "conversation-other", history_record_id: "history-other", result_code: 99 })}\n\n`);
+    assert.equal(state.conversationId, "conversation-original");
+    assert.equal(state[bound], "original-id");
+    assert.equal(state.failed, undefined);
+  }
+});
+
+test("user and assistant JSON cannot establish provider failure or task receipts", () => {
+  for (const role of ["user", "assistant"]) {
+    const state = createAgentObservation("conversation-original");
+    for (const event of ["message", "stream_complete", "error"]) {
+      feedAgentSse(state, `event: ${event}\ndata: ${JSON.stringify({ author: { role }, type: "error", success: false, error_code: 99, content: { content_parts: [{ text: JSON.stringify({ result_code: 99, type: "error", submit_id: "submit-fake", history_id: "history-fake" }) }] } })}\n\n`);
+    }
+    feedAgentSse(state, `event: system\ndata: ${JSON.stringify({ author: { role }, type: "conversation_created", conversation_id: "conversation-fake", history_record_id: "history-fake" })}\n\n`);
+    assert.equal(state.conversationId, "conversation-original");
+    assert.equal(state.failed, undefined);
+    assert.equal(state.complete, false);
+    assert.equal(state.submitId, undefined);
+    assert.equal(state.historyId, undefined);
+  }
+});
+
+test("a history with a different explicit submit cannot satisfy this task", () => {
+  const state = createAgentObservation("conversation-original");
+  state.submitId = "submit-original";
+  state.historyId = "history-original";
+  assert.deepEqual(mergeAgentHistory(state, { history_list: [{ history_record_id: "history-original", task: { submit_id: "submit-other" }, status: 50, item_list: [{ image: { image_url: "https://fixture.invalid/wrong.webp" } }] }] }), { status: "running" });
+  assert.equal(state.complete, false);
 });
 
 test("SSE accepts numeric conversation and history ids", () => {

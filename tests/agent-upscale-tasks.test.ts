@@ -38,6 +38,9 @@ let lastPaidPrompt = "";
 let rowAtPaidPost: any = null;
 let inspectTaskId = "";
 let historyIdLookups: string[][] = [];
+let recoveryAssets: unknown | undefined;
+let recoveryHistories: Record<string, unknown> | undefined;
+let assetQueries = 0;
 const sessionToAccount = new Map<string, string>();
 
 function header(config: any, name: string): string {
@@ -94,7 +97,10 @@ axios.defaults.adapter = async (config) => {
   if (url.includes("/mweb/v1/workspace/list")) {
     return ok({ workspaces: [] });
   }
-  if (url.includes("/mweb/v1/get_asset_list")) return ok({ asset_list: [] });
+  if (url.includes("/mweb/v1/get_asset_list")) {
+    assetQueries++;
+    return ok(recoveryAssets || { asset_list: [] });
+  }
   if (url.includes("/mweb/v1/workspace/create")) {
     workspaceCreations++;
     const session = cookieSession(config);
@@ -173,6 +179,7 @@ axios.defaults.adapter = async (config) => {
       reject(Object.assign(Error("canceled"), { code: "ERR_CANCELED" }));
     }));
     if (historyRet === "1015") return { data: { ret: "1015", errmsg: "登录失效" }, status: 200, statusText: "OK", headers: {}, config };
+    if (recoveryHistories) return ok(recoveryHistories[String(ids?.[0])] || {});
     const history = JSON.parse(fs.readFileSync("tests/fixtures/agent-8k-history-success.json", "utf8"));
     return ok(history);
   }
@@ -204,6 +211,8 @@ function isolateAccount(sessionId: string) {
 }
 
 function resetNetwork() {
+  // Stop this isolated fixture's prior monitors before resetting adapter counters.
+  for (const row of database.prepare("SELECT id,owner FROM agent_upscale_tasks WHERE status IN ('submitting','running')").all() as any[]) cancelUpscaleTask(row.owner, row.id);
   agentConversationSubmissions = 0;
   workspaceCreations = 0;
   paidConversationIds = [];
@@ -228,6 +237,8 @@ function resetNetwork() {
   rowAtPaidPost = null;
   inspectTaskId = "";
   historyIdLookups = [];
+  recoveryAssets = recoveryHistories = undefined;
+  assetQueries = 0;
 }
 
 function readRow(id: string) {
@@ -590,7 +601,7 @@ test("conversation_id is persisted before the paid POST and restart does not rep
   assert.equal(agentConversationSubmissions, before);
 });
 
-test("query after deadline fails closed without opening a new subscription", async () => {
+test("query after deadline keeps an unconfirmed original task without opening a subscription", async () => {
   resetNetwork();
   const account = isolateAccount("session-deadline-throw");
   const id = "upscale_deadline_throw_12";
@@ -605,10 +616,12 @@ test("query after deadline fails closed without opening a new subscription", asy
   const result = await queryUpscaleTask(owner, id);
   assert.ok(Date.now() - started < 400);
   assert.equal(result.status, 200);
-  await until(() => readStatus(id) === "failed");
+  await until(() => Boolean(readRow(id).error));
   const row = readRow(id);
-  assert.equal(row.credential, "");
-  assert.match(String(row.error), /超时|未确认|401/);
+  assert.equal(row.status, "running");
+  assert.ok(row.credential);
+  assert.equal(row.conversation_id, "conv-deadline-throw-1");
+  assert.match(String(row.error), /上游可能继续运行/);
   assert.equal(subscribeCalls, 0);
   assert.equal(accountPool.get(account.id).cooldownUntil || "", "");
   assertPublicBodySafe(result, row);
@@ -630,7 +643,7 @@ test("canceling a running task closes its paid and subscription streams", async 
   }
 });
 
-test("conversation without a provider id stops after 10 minutes without another paid POST", async () => {
+test("conversation without a provider id stops waiting after 10 minutes and keeps recovery evidence", async () => {
   resetNetwork();
   const account = isolateAccount("session-no-progress");
   const id = "upscale_no_progress_12345";
@@ -643,11 +656,88 @@ test("conversation without a provider id stops after 10 minutes without another 
   );
   const result = await queryUpscaleTask(owner, id);
   assert.equal(result.status, 200);
-  await until(() => readStatus(id) === "failed");
+  await until(() => Boolean(readRow(id).error));
+  assert.equal(readStatus(id), "running");
   assert.match(String(readRow(id).error), /10分钟/);
-  assert.equal(readRow(id).credential, "");
+  assert.ok(readRow(id).credential);
   assert.equal(subscribeCalls, 0);
   assert.equal(agentConversationSubmissions, 0);
+});
+
+function seedExpiredOriginal(id: string, status = "running") {
+  const session = "session-original-recovery-" + id;
+  const account = isolateAccount(session);
+  database.prepare(`INSERT INTO agent_upscale_tasks (id,owner,fingerprint,status,account_id,credential,workspace_id,conversation_id,provider_task_id,history_id,deadline)
+    VALUES (?,?,?, ?,?,?,?,?,?,?,?)`).run(id, owner, "fixture", status, account.id, encrypt(session), "workspace-original", "conversation-original", "submit-original", "history-unrelated", Date.now() - 1);
+}
+
+test("expired wrong history uses original receipt and saves confirmed success without a paid POST", async () => {
+  resetNetwork();
+  const id = "upscale_recover_expired_123"; seedExpiredOriginal(id);
+  recoveryAssets = JSON.parse(fs.readFileSync("tests/fixtures/agent-original-history-recovery.json", "utf8"));
+  recoveryHistories = { "history-unrelated": {}, "history-original": { history_list: [{ history_record_id: "history-original", task: { submit_id: "submit-original" }, status: 50, item_list: [{ image: { image_url: RESULT_URL } }] }] } };
+  await queryUpscaleTask(owner, id);
+  await until(() => readStatus(id) === "succeeded");
+  const row = readRow(id);
+  assert.equal(row.history_id, "history-original");
+  assert.equal(row.provider_task_id, "submit-original");
+  assert.equal(row.credits_used, 4);
+  assert.equal(row.credential, "");
+  assert.deepEqual(JSON.parse(row.result), [{ url: RESULT_URL }]);
+  assert.deepEqual(historyIdLookups, [["history-unrelated"], ["history-original"]]);
+  assert.equal(assetQueries, 1);
+  assert.equal(subscribeCalls + workspaceCreations + agentConversationSubmissions + uploads, 0);
+  await queryUpscaleTask(owner, id);
+  assert.equal(historyIdLookups.length, 2);
+});
+
+test("expired mismatched tool receipt remains unconfirmed with original IDs and credential", async () => {
+  resetNetwork();
+  const id = "upscale_recover_mismatch_123"; seedExpiredOriginal(id);
+  recoveryAssets = JSON.parse(fs.readFileSync("tests/fixtures/agent-original-history-recovery.json", "utf8").replaceAll("submit-original", "submit-other"));
+  recoveryHistories = { "history-unrelated": {} };
+  const credential = readRow(id).credential;
+  await queryUpscaleTask(owner, id);
+  await until(() => Boolean(readRow(id).error));
+  assert.equal(readStatus(id), "running");
+  assert.equal(readRow(id).credential, credential);
+  assert.equal(readRow(id).history_id, "history-unrelated");
+  assert.equal(readRow(id).provider_task_id, "submit-original");
+  assert.match(readRow(id).error, /上游可能继续运行/);
+  assert.deepEqual(historyIdLookups, [["history-unrelated"]]);
+  assert.equal(assetQueries, 1);
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  assert.equal(historyIdLookups.length, 1);
+  assert.equal(subscribeCalls + workspaceCreations + agentConversationSubmissions + uploads, 0);
+});
+
+test("deadline final read aborts within one 15 second budget and retains original evidence", async () => {
+  resetNetwork();
+  const id = "upscale_recover_budget_123"; seedExpiredOriginal(id);
+  holdHistory = true;
+  const started = Date.now();
+  try {
+    await queryUpscaleTask(owner, id);
+    await until(() => Boolean(readRow(id).error), 16_500);
+    assert.ok(Date.now() - started < 16_500);
+    assert.equal(historyAborted, true);
+    assert.equal(readStatus(id), "running");
+    assert.ok(readRow(id).credential);
+    assert.equal(readRow(id).history_id, "history-unrelated");
+    assert.equal(historyIdLookups.length, 1);
+    assert.equal(subscribeCalls + workspaceCreations + agentConversationSubmissions + uploads, 0);
+  } finally { holdHistory = false; }
+});
+
+test("explicitly failed and canceled tasks remain terminal and are never recovered", async () => {
+  resetNetwork();
+  for (const status of ["failed", "canceled"]) {
+    const id = "upscale_terminal_" + status + "_123"; seedExpiredOriginal(id, status);
+    const before = readRow(id);
+    assert.equal((await queryUpscaleTask(owner, id)).body.status, status);
+    assert.deepEqual(readRow(id), before);
+  }
+  assert.equal(historyIdLookups.length + assetQueries + subscribeCalls + agentConversationSubmissions + uploads + workspaceCreations, 0);
 });
 
 test("4K task persists its mode and cannot reuse the same ID as 8K", async () => {

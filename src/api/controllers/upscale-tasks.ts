@@ -20,7 +20,7 @@ const UNCONFIRMED = "提交结果未确认；为避免重复扣积分未自动�
 const RISK_4013 = "即梦安全风控拒绝了本次请求（4013：疑似存在异常行为）；未自动重提，请前往即梦网页检查账号安全验证或联系即梦支持";
 const GENERIC_FAIL = "即梦提交失败或结果未确认；未自动重提，请检查账号积分、权限和即梦生成记录";
 const WAIT_TIMEOUT = "即梦任务等待超时，未重新生成；上游可能继续运行，请检查即梦记录";
-const NO_PROGRESS_TIMEOUT = "即梦会话等待超时：10分钟内未返回任务编号或结果，已停止等待；未自动重提，请检查即梦记录与积分";
+const NO_PROGRESS_TIMEOUT = "即梦会话等待超时：10分钟内未返回任务编号或结果，已停止等待；上游可能继续运行，未自动重提，请检查即梦记录与积分";
 
 function attachmentHost(url: string): string {
   try {
@@ -210,7 +210,8 @@ function noProgressDeadline(task: UpscaleTask): number {
 function failClosedIfNoProgress(id: string): boolean {
   const task = get(id);
   if (!task || !active(task) || !task.conversation_id || task.provider_task_id || task.history_id || Date.now() < noProgressDeadline(task)) return false;
-  failTask(id, NO_PROGRESS_TIMEOUT);
+  stopLiveObservation(id);
+  database.prepare("UPDATE agent_upscale_tasks SET error = ? WHERE id = ? AND status = 'running'").run(NO_PROGRESS_TIMEOUT, id);
   return true;
 }
 
@@ -244,9 +245,9 @@ function refreshHistory(id: string, token: string, observation: AgentObservation
   const pending = historyReads.get(id);
   if (pending) return pending.work;
   const task = get(id);
-  if (!active(task) || failClosedIfPastDeadline(id)) return Promise.resolve();
+  if (!active(task)) return Promise.resolve();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), Math.min(15_000, task!.deadline - Date.now()));
+  const timer = setTimeout(() => controller.abort(), 15_000);
   const work = readHistory(id, token, observation, controller.signal).finally(() => {
     clearTimeout(timer);
     if (historyReads.get(id)?.work === work) historyReads.delete(id);
@@ -257,12 +258,12 @@ function refreshHistory(id: string, token: string, observation: AgentObservation
 
 async function readHistory(id: string, token: string, observation: AgentObservation, signal: AbortSignal) {
   const task = get(id);
-  if (!observation.submitId && task?.workspace_id && observation.conversationId) {
+  if ((!observation.submitId || !observation.historyId) && task?.workspace_id && observation.conversationId) {
     await recoverAgentSession(token, task.workspace_id, observation, signal);
   }
-  if (signal.aborted || !active(get(id)) || failClosedIfPastDeadline(id)) return;
-  const result = await queryAgentHistory(token, observation, signal);
-  if (signal.aborted || !active(get(id)) || failClosedIfPastDeadline(id)) return;
+  if (signal.aborted || !active(get(id))) return;
+  const result = await queryAgentHistory(token, observation, signal, task?.workspace_id);
+  if (signal.aborted || !active(get(id))) return;
   if (result.status === "succeeded") {
     observation.urls = result.urls;
     observation.historyId = result.historyId;
@@ -327,16 +328,31 @@ async function runMonitor(id: string, context?: { observation?: AgentObservation
   const token = context?.token || decrypt(task.credential);
   const workspaceId = context?.workspaceId || task.workspace_id;
   const observation = liveObservations.get(id) || context?.observation || watchObservation(id, restoreObservation(task));
+  let finalCheck: Promise<void> | undefined;
+  const finishWaiting = () => finalCheck ||= (async () => {
+    try { await refreshHistory(id, token, observation); } catch { /* Original result remains unconfirmed; never infer provider failure. */ }
+    if (applyTerminal(id, observation) || !active(get(id))) return;
+    stopLiveObservation(id);
+    database.prepare("UPDATE agent_upscale_tasks SET error = ? WHERE id = ? AND status = 'running'").run(WAIT_TIMEOUT, id);
+  })();
+  if (Date.now() >= task.deadline) {
+    await finishWaiting();
+    return;
+  }
   let nextHistoryAt = 0;
   let checkingHistory = false;
   // A healthy subscription can stay open for the entire job. History lookup
   // must run independently, including when an ID first arrives on either SSE.
   const historyPoll = setInterval(() => {
-    if (!active(get(id)) || failClosedIfNoProgress(id) || failClosedIfPastDeadline(id)) return;
+    const current = get(id);
+    if (!active(current)) return;
+    if (Date.now() >= current!.deadline) { void finishWaiting(); return; }
+    if (failClosedIfNoProgress(id)) return;
     if (checkingHistory || Date.now() < nextHistoryAt) return;
     checkingHistory = true;
     nextHistoryAt = Date.now() + HISTORY_POLL_MS;
     void refreshHistory(id, token, observation).then(() => applyTerminal(id, observation)).catch((error) => {
+      if (Date.now() >= (get(id)?.deadline ?? Infinity)) { void finishWaiting(); return; }
       if (isRisk4013(error)) failTask(id, RISK_4013, error, RISK_COOLDOWN_MS);
       else {
         const current = get(id);
@@ -348,40 +364,41 @@ async function runMonitor(id: string, context?: { observation?: AgentObservation
   try {
     if (observation.historyId) nextHistoryAt = Date.now() + HISTORY_POLL_MS;
     try { if (observation.historyId || !context) await refreshHistory(id, token, observation); } catch (error) {
+      if (Date.now() >= (get(id)?.deadline ?? Infinity)) { await finishWaiting(); return; }
       if (isRisk4013(error)) {
         failTask(id, RISK_4013, error, RISK_COOLDOWN_MS);
         return;
       }
-      if (failClosedIfPastDeadline(id, error)) return;
       const cooldown = accountFailureCooldown(error);
       if (task.account_id && cooldown != null) markFailure(task.account_id, cooldown);
     }
     if (applyTerminal(id, observation)) return;
     if (!active(get(id))) return;
+    if (Date.now() >= (get(id)?.deadline ?? Infinity)) { await finishWaiting(); return; }
     if (failClosedIfNoProgress(id)) return;
     if (workspaceId && observation.conversationId) {
       await subscribeAgentWorkspace(token, workspaceId, observation, noProgressDeadline(get(id) || task));
       persistObservation(id, observation);
       try { await refreshHistory(id, token, observation); } catch (error) {
+        if (Date.now() >= (get(id)?.deadline ?? Infinity)) { await finishWaiting(); return; }
         if (isRisk4013(error)) {
           failTask(id, RISK_4013, error, RISK_COOLDOWN_MS);
           return;
         }
-        if (failClosedIfPastDeadline(id, error)) return;
         const cooldown = accountFailureCooldown(error);
         if (task.account_id && cooldown != null) markFailure(task.account_id, cooldown);
       }
       if (applyTerminal(id, observation)) return;
     }
-    if (failClosedIfNoProgress(id)) return;
     const current = get(id);
-    if (current && active(current) && Date.now() >= current.deadline) failTask(id, WAIT_TIMEOUT);
+    if (current && active(current) && Date.now() >= current.deadline) await finishWaiting();
+    else failClosedIfNoProgress(id);
   } catch (error) {
+    if (Date.now() >= (get(id)?.deadline ?? Infinity)) { await finishWaiting(); return; }
     if (isRisk4013(error)) {
       classifySubmitFailure(id, error, true);
       return;
     }
-    if (failClosedIfPastDeadline(id, error)) return;
     const current = get(id);
     if (!current || !active(current)) return;
     const cooldown = accountFailureCooldown(error);
@@ -425,7 +442,8 @@ async function consumePaidStream(
     if (applyTerminal(id, observation)) return;
     ensureMonitor(id, { observation, token, workspaceId });
   } catch (error) {
-    classifySubmitFailure(id, error, true);
+    if (Date.now() >= task.deadline) ensureMonitor(id, { observation, token, workspaceId });
+    else classifySubmitFailure(id, error, true);
   }
 }
 

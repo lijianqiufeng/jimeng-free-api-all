@@ -66,8 +66,8 @@ export type AgentHistoryResult =
 
 export function usableAgentId(value: unknown): string | undefined {
   if (typeof value === "number") {
-    if (!Number.isFinite(value) || value === 0) return undefined;
-    return String(Math.trunc(value));
+    if (!Number.isSafeInteger(value) || value === 0) return undefined;
+    return String(value);
   }
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
@@ -185,46 +185,57 @@ export function mergeAgentHistory(state: AgentObservation, history: unknown): Ag
 
 function applySseEvent(state: AgentObservation, event: ParseEvent): void {
   if (event.type !== "event") return;
-  if (event.event === "error") markStreamFailure(state);
   const payload = parseJsonValue(event.data);
-  if (payload === undefined) return;
+  if (payload === undefined) {
+    if (event.event === "error") markStreamFailure(state);
+    return;
+  }
+  const created = payload as Record<string, unknown>;
+  const role = (created?.author as { role?: string } | undefined)?.role;
+  if (created?.type === "conversation_created" && role !== "user" && role !== "assistant") {
+    const conversationId = usableAgentId(created.conversation_id);
+    if (conversationId && conversationId !== state.conversationId && (state.submitId || state.historyId)) return;
+    if (conversationId) state.conversationId = conversationId;
+    // A conversation's provisional ID cannot replace its exact tool receipt.
+    const historyId = usableAgentId(created.history_record_id);
+    if (!state.historyId && historyId) state.historyId = historyId;
+  }
+  if (event.event === "error" && role !== "user" && role !== "assistant") markStreamFailure(state);
   inspectJson(state, payload, new Set());
-  if (event.event === "stream_complete" && payload && typeof payload === "object" && !Array.isArray(payload) && isFailedCompletion(payload as Record<string, unknown>)) {
+  if (event.event === "stream_complete" && role !== "user" && role !== "assistant" && payload && typeof payload === "object" && !Array.isArray(payload) && isFailedCompletion(payload as Record<string, unknown>)) {
     markStreamFailure(state);
   }
 }
 
-function inspectJson(state: AgentObservation, value: unknown, seen: Set<object>): void {
+function inspectJson(state: AgentObservation, value: unknown, seen: Set<object>, receipt = true): void {
   if (typeof value === "string") {
     const nested = parseJsonValue(value);
-    if (nested !== undefined && nested !== value) inspectJson(state, nested, seen);
+    if (nested !== undefined && nested !== value) inspectJson(state, nested, seen, receipt);
     return;
   }
   if (!value || typeof value !== "object") return;
   if (seen.has(value)) return;
   seen.add(value);
   const record = value as Record<string, unknown>;
+  const role = (record.author as { role?: string } | undefined)?.role;
+  if (role === "user" || role === "assistant") receipt = false;
   const conversationId = usableAgentId(record.conversation_id);
-  if (conversationId) state.conversationId = conversationId;
+  if (conversationId && conversationId !== state.conversationId) return;
+  const submitId = receipt ? usableAgentId(record.submit_id) : undefined;
+  if (submitId && state.submitId && submitId !== state.submitId) return;
   const resolution = nestedResolutionType(record);
   const resolutionLabel = providerResolutionLabel(resolution);
   if (resolutionLabel) state.providerLabel = resolutionLabel;
   const toolName = typeof record.name === "string" ? record.name : typeof (record.func as { name?: unknown } | undefined)?.name === "string" ? (record.func as { name: string }).name : undefined;
   if (toolName === SUPER_RESOLUTION_TOOL && resolutionLabel) state.providerLabel = resolutionLabel;
-  const submitId = usableAgentId(record.submit_id);
   if (submitId) state.submitId = submitId;
-  if (record.data && typeof record.data === "object") {
-    const data = record.data as Record<string, unknown>;
-    const nestedSubmitId = usableAgentId(data.submit_id);
-    if (nestedSubmitId) state.submitId = nestedSubmitId;
-    applyCommerce(state, data.commerce_info);
-  }
-  applyCommerce(state, record.commerce_info);
+  if (submitId) applyCommerce(state, record.commerce_info);
   const historyId = usableAgentId(record.history_record_id) || usableAgentId(record.history_id);
-  if (historyId) state.historyId = historyId;
-  if (record.type === "stream_complete" && (state.urls.length > 0 || state.failed)) state.complete = true;
-  if (isTerminalError(record)) markStreamFailure(state);
-  for (const nested of Array.isArray(value) ? value : Object.values(record)) inspectJson(state, nested, seen);
+  // Asset/reference IDs elsewhere in an SSE message are not generation IDs.
+  if (submitId && historyId) state.historyId = historyId;
+  if (receipt && record.type === "stream_complete" && (state.urls.length > 0 || state.failed)) state.complete = true;
+  if (receipt && isTerminalError(record)) markStreamFailure(state);
+  for (const nested of Array.isArray(value) ? value : Object.values(record)) inspectJson(state, nested, seen, receipt);
 }
 
 function nestedResolutionType(record: Record<string, unknown>): string | undefined {
@@ -298,17 +309,17 @@ function parseJsonValue(text: string): unknown {
   }
 }
 
-function findHistoryRecord(history: unknown, submitId: string | undefined, historyId?: string): Record<string, any> | undefined {
+export function findHistoryRecord(history: unknown, submitId: string | undefined, historyId?: string): Record<string, any> | undefined {
   const records = historyRecords(history);
   if (submitId) {
     const matched = records.find((record) => String(record?.task?.submit_id || "") === submitId);
     if (matched) return matched;
   }
   if (historyId) {
-    const matched = records.find((record) => usableAgentId(record?.history_record_id) === historyId || usableAgentId(record?.id) === historyId);
+    const matched = records.find((record) => (!submitId || !record?.task?.submit_id) && (usableAgentId(record?.history_record_id) === historyId || usableAgentId(record?.id) === historyId));
     if (matched) return matched;
   }
-  return records.length === 1 ? records[0] : undefined;
+  return !submitId && !historyId && records.length === 1 ? records[0] : undefined;
 }
 
 function historyRecords(history: unknown): Array<Record<string, any>> {

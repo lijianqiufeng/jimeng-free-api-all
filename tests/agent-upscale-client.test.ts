@@ -52,6 +52,9 @@ let imageByUriBodies: unknown[] | undefined;
 let siblingUri2Image = false;
 let lastGetImage: any;
 let workspaceCreateData: unknown | undefined;
+let recoveryAssets: unknown | undefined;
+let recoveryHistories: Record<string, unknown> | undefined;
+let recoveryRequests: Array<{ path: string; body: any }> = [];
 
 function header(config: any, name: string): string {
   const headers = config.headers || {};
@@ -186,8 +189,16 @@ axios.defaults.adapter = async (config) => {
   }
   if (url.includes("/get_history_by_ids")) {
     historyQueries++;
+    if (recoveryHistories) {
+      recoveryRequests.push({ path: "history", body: body(config) });
+      return ok(recoveryHistories[String(body(config).history_ids?.[0])] || {});
+    }
     const history = JSON.parse(fs.readFileSync("tests/fixtures/agent-8k-history-success.json", "utf8"));
     return ok(history);
+  }
+  if (url.includes("/get_asset_list") && recoveryAssets) {
+    recoveryRequests.push({ path: "session", body: body(config) });
+    return ok(recoveryAssets);
   }
   throw Error("unmocked axios network forbidden");
 };
@@ -465,7 +476,8 @@ test("subscribe parses only events for the task conversation", async () => {
   assert.equal(lastSubscribe.timeout, 0);
   assert.equal(header(lastSubscribe, "Accept-Encoding"), "identity");
   assert.deepEqual(subscribeBodies, [{ workspace_id: "workspace-account-a" }]);
-  assert.equal(observation.historyId, "history-nested-keep");
+  // A nested asset ID without its exact tool submit is not a task receipt.
+  assert.equal(observation.historyId, "history-keep");
   assert.equal(observation.complete, false);
   assert.equal(observation.conversationId, "conv-keep");
 });
@@ -522,6 +534,31 @@ test("history lookup is skipped until a history ID exists", async () => {
     historyId: "history-test-001",
     urls: ["https://fixture.invalid/result-8k.webp"],
   });
+});
+
+test("empty wrong history recovers only the original conversation and reads corrected history once", async () => {
+  recoveryAssets = JSON.parse(fs.readFileSync("tests/fixtures/agent-original-history-recovery.json", "utf8"));
+  recoveryHistories = { "history-unrelated": {}, "history-original": { history_list: [{ history_record_id: "history-original", task: { submit_id: "submit-original" }, status: 50, item_list: [{ image: { image_url: "https://fixture.invalid/recovered.webp" } }] }] } };
+  recoveryRequests = [];
+  const before = [conversationPosts, workspaceCreateBodies.length];
+  try {
+    const state = createAgentObservation("conversation-original");
+    state.submitId = "submit-original"; state.historyId = "history-unrelated";
+    const result = await queryAgentHistory("session-original", state, undefined, "workspace-original");
+    assert.equal(result.status, "succeeded");
+    assert.equal(state.historyId, "history-original");
+    assert.deepEqual(recoveryRequests.map(x => x.path), ["history", "session", "history"]);
+    assert.deepEqual(recoveryRequests.filter(x => x.path === "history").map(x => x.body.history_ids), [["history-unrelated"], ["history-original"]]);
+    assert.equal(recoveryRequests[1].body.workspace_id, "workspace-original");
+    assert.equal(state.creditsUsed, 4);
+    assert.deepEqual([conversationPosts, workspaceCreateBodies.length], before);
+    recoveryRequests = [];
+    const other = createAgentObservation("conversation-other");
+    other.submitId = "submit-original"; other.historyId = "history-unrelated";
+    assert.deepEqual(await queryAgentHistory("session-original", other, undefined, "workspace-original"), { status: "running" });
+    assert.equal(other.historyId, "history-unrelated");
+    assert.deepEqual(recoveryRequests.map(x => x.path), ["history", "session"]);
+  } finally { recoveryAssets = recoveryHistories = undefined; }
 });
 
 test("stream consume accepts split chunks and stops at the deadline", async () => {

@@ -7,6 +7,7 @@ import {
   buildAgentConversation,
   createAgentObservation,
   feedAgentSse,
+  findHistoryRecord,
   mergeAgentHistory,
   mergeAgentSession,
   usableAgentId,
@@ -232,13 +233,23 @@ export async function subscribeAgentWorkspace(
   await consumeAgentStream(stream, observation, deadline, { matchConversation: true });
 }
 
-export async function queryAgentHistory(token: string, observation: AgentObservation, signal?: AbortSignal): Promise<AgentHistoryResult> {
+export async function queryAgentHistory(token: string, observation: AgentObservation, signal?: AbortSignal, workspaceId?: string): Promise<AgentHistoryResult> {
   if (!observation.historyId) return { status: "running" };
-  const history = await request("post", "/mweb/v1/get_history_by_ids", token, {
-    data: { history_ids: [observation.historyId] },
+  const historyId = observation.historyId;
+  const read = (id: string) => request("post", "/mweb/v1/get_history_by_ids", token, {
+    data: { history_ids: [id] },
     timeout: 15_000,
     signal,
   });
+  const history = await read(historyId);
+  if (findHistoryRecord(history, observation.submitId, historyId) || !workspaceId || !observation.conversationId || signal?.aborted) {
+    return mergeAgentHistory(observation, history);
+  }
+  // Repair only from this original conversation's tool receipt; never resubmit.
+  await recoverAgentSession(token, workspaceId, observation, signal);
+  if (!signal?.aborted && observation.historyId && observation.historyId !== historyId) {
+    return mergeAgentHistory(observation, await read(observation.historyId));
+  }
   return mergeAgentHistory(observation, history);
 }
 
@@ -374,7 +385,7 @@ function eventMatchesConversation(data: string, observation: AgentObservation): 
   return ids.size === 1 && ids.has(observation.conversationId);
 }
 
-export async function recoverAgentSession(token: string, workspaceId: string, observation: AgentObservation, signal: AbortSignal): Promise<void> {
+export async function recoverAgentSession(token: string, workspaceId: string, observation: AgentObservation, signal?: AbortSignal): Promise<void> {
   const assets = await request("post", "/mweb/v1/get_asset_list", token, {
     timeout: 15_000,
     signal,
@@ -385,7 +396,7 @@ export async function recoverAgentSession(token: string, workspaceId: string, ob
       option: { order_by: 0, only_favorited: false, end_time_stamp: 0, hide_story_agent_result: true },
     },
   });
-  if (!signal.aborted) mergeAgentSession(observation, assets);
+  if (!signal?.aborted) mergeAgentSession(observation, assets);
 }
 
 function destroyStream(stream: NodeJS.ReadableStream): void {
