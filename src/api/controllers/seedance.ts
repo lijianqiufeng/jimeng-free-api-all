@@ -32,7 +32,11 @@ export async function submitSeedanceVideo(input: ReturnType<typeof seedanceInput
     if (total > (is25 ? 30200 : kind === "video" ? 15200 : 15000)) throw Error("参考音视频总时长超限，未提交生成");
   }
   const prices = config.raw?.commercial_config?.resolution_price_configs?.find((price: any) => price.resolution === input.resolution);
-  const price = is25 && !input.references.some(ref => ref.kind === "video") ? prices?.no_input_video_price : prices?.price;
+  const hasVideo = input.references.some(ref => ref.kind === "video");
+  // Standard 2.0 uses the website's default / input-video commerce branches.
+  const price = input.model === "jimeng-video-seedance-2.0"
+    ? hasVideo ? config.raw?.commercial_config?.format_conf?.unified_edit_input_video : config.raw?.commercial_config?.default
+    : is25 && !hasVideo ? prices?.no_input_video_price : prices?.price;
   if (!price?.benefit_type) throw Error("当前视频计费项未确认，未提交生成");
   const commerce = { benefit_type: price.benefit_type, resource_id: "generate_video", resource_id_type: "str", resource_sub_type: "aigc" };
   const componentId = randomUUID();

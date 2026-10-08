@@ -5,6 +5,7 @@ import childProcess from "node:child_process";
 import axios from "axios";
 import CRC32 from "crc-32";
 import models from "./fixtures/seedance-models.json";
+import standardModel from "./fixtures/seedance20-model.json";
 import { database, createApiKey, validateApiKey } from "@/lib/database.ts";
 import pool from "@/lib/account-pool.ts";
 import { createTask, queryTask, cancelTask } from "@/api/controllers/tasks.ts";
@@ -53,7 +54,7 @@ axios.defaults.adapter = async config => {
   if (url.includes("Action=ApplyImageUpload")) return raw({ Result: { UploadAddress: { UploadHosts: ["upload.test"], StoreInfos: [{ StoreUri: `frame-${uploaded + 1}`, Auth: "fake" }], SessionKey: "fake" } } });
   if (url.startsWith("https://upload.test/")) { uploaded++; return raw({ code: 2000 }); }
   if (url.includes("Action=CommitImageUpload")) return raw({ Result: { Results: [{ Uri: `frame-${uploaded}` }] } });
-  if (url.endsWith("/video_generate/get_common_config")) return ok({ models });
+  if (url.endsWith("/video_generate/get_common_config")) return ok({ models: [...models, standardModel] });
   if (url.endsWith("/get_common_config")) return ok({});
   if (url.endsWith("/user_credit")) return ok({ credit: { gift_credit: 500, purchase_credit: 0, vip_credit: 0 } });
   if (url.includes("/passport/account/info/v2")) { userReads++; return raw({ message: "success", data: { user_id: 1234567890123456789, user_id_str: "1234567890123456789", user_info: { is_vip: true } } }); }
@@ -81,8 +82,9 @@ async function waitFor(id: string, status: string) {
   assert.equal(get(id)?.status, status);
 }
 
-test("four official models use dynamic resolutions, frame counts and ordinary commerce", async () => {
+test("five official models use dynamic resolutions, frame counts and ordinary commerce", async () => {
   const expected = [
+    ["jimeng-video-seedance-2.0", "dreamina_seedance_40_pro", ["720p"], 15],
     ["jimeng-video-seedance-2.5", "dreamina_seedance_45_pro", ["480p", "720p", "1080p"], 30],
     ["jimeng-video-seedance-2.0-mini", "dreamina_seedance_40_mini", ["720p"], 15],
     ["jimeng-video-seedance-2.0-fast-vip", "dreamina_seedance_40_vision", ["720p"], 15],
@@ -108,6 +110,7 @@ test("four official models use dynamic resolutions, frame counts and ordinary co
     assert.equal(params.video_gen_inputs[0].resolution, "720p");
     assert.ok(!payload.extend.m_video_commerce_info.benefit_type.includes("long_video"));
     if (max === 30) assert.equal(payload.extend.m_video_commerce_info.benefit_type, "seedance_25_720p_no_input_video_output");
+    if (model === "jimeng-video-seedance-2.0") assert.equal(payload.extend.m_video_commerce_info.benefit_type, "dreamina_video_seedance_20_pro");
     assert.equal((await queryTask(owner + 1, id)).status, 404);
     database.prepare("UPDATE canvas_tasks SET deadline=? WHERE id=?").run(Date.now() - 1, id);
     historyStatus = 20;
@@ -121,6 +124,30 @@ test("four official models use dynamic resolutions, frame counts and ordinary co
     assert.equal(submits, before + 1);
   }
 });
+
+test("standard 2.0 uses the official reference-video commerce branch and rejects unsupported settings", async () => {
+  const model = "jimeng-video-seedance-2.0", image = "data:image/png;base64," + readFileSync("tests/fixtures/seedance-reference.png").toString("base64");
+  const references = [{ kind: "image", url: image }, { kind: "image", url: image }, { kind: "video", url: "https://fixture.tos-cn-beijing.volces.com/a.mp4" }, { kind: "audio", url: "https://fixture.tos-cn-beijing.volces.com/a.mp3" }];
+  const before = submits, previousUploads = uploaded;
+  await submitSeedanceVideo(seedanceInput({ ...base, model, references }), "fixed-video-account", { beforeSubmit() {}, onSubmitted() {} });
+  assert.equal(submits, before + 1);
+  assert.equal(payload.extend.m_video_commerce_info.benefit_type, "dreamina_video_seedance_20_video_add");
+  assert.deepEqual(payload.extend.m_video_commerce_info_list, [payload.extend.m_video_commerce_info]);
+  const input = draft.component_list[0].abilities.gen_video.text_to_video_params.video_gen_inputs[0].unified_edit_input;
+  assert.deepEqual(input.material_list.map((m: any) => m.material_type), ["image", "image", "video", "audio"]);
+  assert.deepEqual(input.meta_list.slice(0, 4).map((m: any) => m.material_ref.material_idx), [0, 1, 2, 3]);
+  assert.equal(uploaded, previousUploads + 2);
+  assert.throws(() => seedanceInput({ ...base, model, resolution: "1080p" }));
+  assert.throws(() => seedanceInput({ ...base, model, duration: 16 }));
+  assert.throws(() => seedanceInput({ ...base, model, references: Array(10).fill(references[0]) }));
+  await assert.rejects(generateVideoWithRetry("seedance-2.0-pro", "fixture", {}, "fixed-video-account"), /\/v1\/tasks/);
+  const commercial = standardModel.commercial_config;
+  try {
+    standardModel.commercial_config = {} as any;
+    await assert.rejects(submitSeedanceVideo(seedanceInput({ ...base, model }), "new-no-commerce-fixture", { beforeSubmit() {}, onSubmitting() { assert.fail(); }, onSubmitted() { assert.fail(); } }), /计费项未确认/);
+  } finally { standardModel.commercial_config = commercial; }
+  assert.equal(submits, before + 1);
+});
 test("unsupported parameters and internal URLs fail before any paid request", () => {
   for (const change of [{ duration: -1 }, { n: 2 }, { resolution: "4k" }, { ratio: "adaptive" }, { model: "jimeng-video-seedance-2.0-mini", duration: 30 }, { references: [{ kind: "video", url: "http://127.0.0.1/private" }] }]) assert.throws(() => taskInput({ ...base, id: "video_invalid_12345", ...change }));
   assert.equal(taskResult({ a: { status: 40 } }, "a", "video").status, "failed");
@@ -130,7 +157,7 @@ test("all multimodal references must upload, preserving material order", async (
   const references = [{ kind: "image", url: image }, { kind: "image", url: image }, { kind: "video", url: "https://fixture.tos-cn-beijing.volces.com/a.mp4" }, { kind: "audio", url: "https://fixture.tos-cn-beijing.volces.com/a.mp3" }];
   let submitted = "";
   vodStages.length = 0;
-  const previousReads = userReads;
+  const previousReads = userReads, previousUploads = uploaded;
   let submitting = 0;
   await submitSeedanceVideo(seedanceInput({ ...base, references }), "fixed-video-account", { beforeSubmit() {}, onSubmitting() { submitting++; assert.equal(vodStages.at(-1), "CommitUploadInner"); }, onSubmitted(id) { submitted = id; } });
   assert.ok(submitted);
@@ -140,7 +167,7 @@ test("all multimodal references must upload, preserving material order", async (
   const unified = draft.component_list[0].abilities.gen_video.text_to_video_params.video_gen_inputs[0].unified_edit_input;
   assert.deepEqual(unified.material_list.map((x: any) => x.material_type), ["image", "image", "video", "audio"]);
   assert.deepEqual(unified.meta_list.slice(0, 4).map((x: any) => x.material_ref.material_idx), [0, 1, 2, 3]);
-  assert.deepEqual(unified.material_list.slice(0, 2).map((x: any) => [x.image_info.image_uri, x.image_info.width, x.image_info.height]), [["frame-1", 512, 512], ["frame-2", 512, 512]]);
+  assert.deepEqual(unified.material_list.slice(0, 2).map((x: any) => [x.image_info.image_uri, x.image_info.width, x.image_info.height]), [[`frame-${previousUploads + 1}`, 512, 512], [`frame-${previousUploads + 2}`, 512, 512]]);
   assert.equal(payload.extend.m_video_commerce_info.benefit_type, "seedance_25_720p_output");
   const before = submits; fetchFails = true;
   await assert.rejects(submitSeedanceVideo(seedanceInput({ ...base, references }), "fixed-video-account", { beforeSubmit() {}, onSubmitting() { assert.fail(); }, onSubmitted() { assert.fail(); } }), /参考视频读取失败，未提交生成/);

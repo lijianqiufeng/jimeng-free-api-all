@@ -1,4 +1,5 @@
 export const SEEDANCE_MODELS = {
+  "jimeng-video-seedance-2.0": { resolutions: ["720p"], maxDuration: 15, images: 9, videos: 3, audios: 3, total: 12 },
   "jimeng-video-seedance-2.5": { resolutions: ["480p", "720p", "1080p"], maxDuration: 30, images: 30, videos: 10, audios: 10, total: 50 },
   "jimeng-video-seedance-2.0-mini": { resolutions: ["720p"], maxDuration: 15, images: 9, videos: 3, audios: 3, total: 12 },
   "jimeng-video-seedance-2.0-fast-vip": { resolutions: ["720p"], maxDuration: 15, images: 9, videos: 3, audios: 3, total: 12 },

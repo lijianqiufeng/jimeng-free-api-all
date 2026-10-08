@@ -25,7 +25,7 @@ export default {
     post: {
 
         '/generations': async (request: Request) => {
-            if (Object.hasOwn(SEEDANCE_MODELS, request.body?.model)) throw new Error('这四个即梦视频模型请使用 /v1/tasks 持久化任务接口，避免断线重提或自动降级');
+            if (Object.hasOwn(SEEDANCE_MODELS, request.body?.model)) throw new Error('这些即梦视频模型请使用 /v1/tasks 持久化任务接口，避免断线重提或自动降级');
             request
                 .validate('body.model', v => _.isUndefined(v) || _.isString(v))
                 .validate('body.prompt', _.isString)
