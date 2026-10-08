@@ -9,6 +9,7 @@ import EX from "@/api/consts/exceptions.ts";
 import { createParser } from "eventsource-parser";
 import logger from "@/lib/logger.ts";
 import util from "@/lib/util.ts";
+import { seedanceBrowser, usesSeedanceBrowser } from "@/lib/seedance-browser.ts";
 
 // 模型名称
 const MODEL_NAME = "jimeng";
@@ -141,7 +142,7 @@ export async function request(
   method: string,
   uri: string,
   refreshToken: string,
-  options: AxiosRequestConfig = {}
+  options: AxiosRequestConfig & { beforeSubmit?: () => void; onSubmitting?: () => void } = {}
 ) {
   const token = await acquireToken(refreshToken);
   const deviceTime = util.unixTimestamp();
@@ -188,15 +189,22 @@ export async function request(
         await new Promise(resolve => setTimeout(resolve, 1000 * retries));
       }
 
-      const response = await axios.request({
-        method,
-        url: fullUrl,
-        params: requestParams,
-        headers: headers,
-        timeout: 45000, // 增加超时时间到45秒
-        validateStatus: () => true, // 允许任何状态码
-        ..._.omit(options, "params", "headers"),
-      });
+      let response: AxiosResponse;
+      if (usesSeedanceBrowser(method, uri, options.data)) {
+        response = await seedanceBrowser.request({ token, params: requestParams, headers, data: options.data, beforeSubmit: options.beforeSubmit, onSubmitting: options.onSubmitting });
+      } else {
+        options.beforeSubmit?.();
+        options.onSubmitting?.();
+        response = await axios.request({
+          method,
+          url: fullUrl,
+          params: requestParams,
+          headers: headers,
+          timeout: 45000, // 增加超时时间到45秒
+          validateStatus: () => true, // 允许任何状态码
+          ..._.omit(options, "params", "headers", "beforeSubmit", "onSubmitting"),
+        });
+      }
 
       // 记录响应状态和头信息
       logger.info(`响应状态: ${response.status} ${response.statusText}`);

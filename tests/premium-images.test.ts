@@ -77,6 +77,23 @@ test("fresh unlimited image and queue entitlements permit original 4K payload wi
   assert.equal(posts, 2);
 });
 
+test("2K-only unlimited assets may omit limit_free_type without losing their expiry and quota checks", async () => {
+  const before = posts;
+  benefits = premiumImageBenefits();
+  benefits.asset_list = benefits.asset_list.filter(asset => !asset.benefit_type.endsWith("4k"));
+  for (const asset of benefits.asset_list) {
+    for (const detail of asset.asset_details) delete (detail as any).limit_free_type;
+  }
+  try {
+    await generateImages("jimeng-image-5.0-lite", "test", { ...options, resolution: "2k" }, "fake-free-session");
+    assert.equal(posts, before + 1);
+    assert.equal(JSON.parse(lastBody.draft_content).component_list[0].abilities.generate.core_param.large_image_info.resolution_type, "2k");
+    benefits.asset_list.find(asset => asset.benefit_type === "image_basic_v5_2k")!.asset_details[0].remain_time = 0;
+    await assert.rejects(generateImages("jimeng-image-5.0-lite", "test", { ...options, resolution: "2k" }, "fake-free-session"), /免费高速权益.*未提交生成/);
+    assert.equal(posts, before + 1);
+  } finally { benefits = premiumImageBenefits(); }
+});
+
 test("missing, exhausted, expired, credit-only and wrong-resolution benefits never submit", async () => {
   const before = posts;
   const mutate = [
@@ -84,6 +101,7 @@ test("missing, exhausted, expired, credit-only and wrong-resolution benefits nev
     () => { benefits.asset_list.find(asset => asset.benefit_type === "image_basic_v5_4k")!.asset_details[0].quota_left = 0; },
     () => { benefits.asset_list.find(asset => asset.benefit_type === "image_basic_v5_4k")!.asset_details[0].remain_time = 0; },
     () => { benefits.asset_list.find(asset => asset.benefit_type === "image_basic_v5_4k")!.asset_details[0].pay_mode = "UserCredit"; },
+    () => { benefits.asset_list.find(asset => asset.benefit_type === "image_basic_v5_4k")!.asset_details[0].limit_free_type = 1; },
     () => { benefits.asset_list = benefits.asset_list.filter(asset => asset.benefit_type !== "image_basic_v5_4k"); },
   ];
   for (const change of mutate) {

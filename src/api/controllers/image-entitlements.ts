@@ -23,7 +23,8 @@ export async function assertPremiumImageEntitlement(model: JimengModelConfig, re
   }
   const free = (type: string, id: string, key: string, timed: boolean) => response?.asset_list?.some((asset: any) =>
     asset.resource_type === type && asset.resource_id === id && asset.benefit_type === key &&
-    asset.asset_details?.some((detail: any) => detail.pay_mode === "LimitFree" && detail.limit_free_type === 2 &&
+    // The 2K-only response omits limit_free_type, including for queue_speed.
+    asset.asset_details?.some((detail: any) => detail.pay_mode === "LimitFree" && (detail.limit_free_type === undefined || detail.limit_free_type === 2) &&
       detail.quota_all === -1 && detail.quota_left === -1 &&
       (timed ? Number.isFinite(detail.remain_time) && detail.remain_time > 0 : detail.remain_time === undefined || Number.isFinite(detail.remain_time) && detail.remain_time > 0)));
   if (!free("aigc", "generate_img", expected, true) || !free("normal_func", "queue_speed", "queue_speed", false)) {

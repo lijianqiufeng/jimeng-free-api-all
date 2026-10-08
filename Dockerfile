@@ -22,8 +22,8 @@ RUN rm -rf node_modules && npm ci --omit=dev --registry https://registry.npmmirr
 # 最终运行镜像 - 更小的基础镜像
 FROM node:22-alpine
 
-# 安装 SQLite 运行库及参考音视频原素材 ffprobe
-RUN apk add --no-cache libstdc++ ffmpeg
+# SQLite、参考音视频检查及显式启用的 Seedance 官方页面 SDK 传输
+RUN apk add --no-cache libstdc++ ffmpeg chromium
 
 WORKDIR /app
 
