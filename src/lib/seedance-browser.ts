@@ -7,8 +7,13 @@ const MODELS = new Set(["dreamina_seedance_40_pro", "dreamina_seedance_40"]);
 type Input = { token: string; params: Record<string, unknown>; headers: Record<string, string>; data: any; beforeSubmit?: () => void; onSubmitting?: () => void; signal?: AbortSignal };
 type Session = { context: BrowserContext; page: Page; body: string | null; sent: boolean; closing?: Promise<void> };
 
+export function supportsSeedanceBrowser(method: string, uri: string, data: any) {
+  return method.toLowerCase() === "post" && uri === GENERATE && MODELS.has(data?.extend?.root_model);
+}
+
+/** Backwards compatible opt-in used before the dashboard transport modes existed. */
 export function usesSeedanceBrowser(method: string, uri: string, data: any) {
-  return process.env.JIMENG_BROWSER_TRANSPORT === "on" && method.toLowerCase() === "post" && uri === GENERATE && MODELS.has(data?.extend?.root_model);
+  return process.env.JIMENG_BROWSER_TRANSPORT === "on" && supportsSeedanceBrowser(method, uri, data);
 }
 
 async function launchBrowser() {

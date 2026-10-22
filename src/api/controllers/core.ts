@@ -12,7 +12,8 @@ import EX from "@/api/consts/exceptions.ts";
 import { createParser } from "eventsource-parser";
 import logger from "@/lib/logger.ts";
 import util from "@/lib/util.ts";
-import { seedanceBrowser, usesSeedanceBrowser } from "@/lib/seedance-browser.ts";
+import { seedanceBrowser, supportsSeedanceBrowser, usesSeedanceBrowser } from "@/lib/seedance-browser.ts";
+import browserTransport from "@/lib/browser-transport.ts";
 
 type VideoSubmissionReceipt = { kind: "business-error"; httpStatus: number; code: number; message: string; receivedAt: number; responseJsonHash: string; acceptanceIdentity: boolean; logId?: string };
 const videoSubmissionReceipts = new WeakMap<Error, VideoSubmissionReceipt>();
@@ -157,6 +158,42 @@ export async function receiveCredit(refreshToken: string) {
 }
 
 /**
+ * 将cookie字符串拆分为键值对
+ *
+ * @param cookie cookie字符串
+ */
+export function parseCookiePairs(cookie: string): Array<[string, string]> {
+  return cookie
+    .split("; ")
+    .filter(Boolean)
+    .map((item) => {
+      const index = item.indexOf("=");
+      if (index < 0) return [item, ""] as [string, string];
+      return [item.slice(0, index), item.slice(index + 1)] as [string, string];
+    });
+}
+
+/**
+ * 生成风控缓存键
+ *
+ * 风控按模型链路判定，而图片与视频共用 /mweb/v1/aigc_draft/generate 这一个路径，
+ * 因此缓存键必须带上请求体里的 root_model，避免视频触发的风控把图片请求也带进浏览器。
+ *
+ * @param uri 请求路径
+ * @param data 请求体
+ */
+export function getRiskControlKey(uri: string, data: any) {
+  let rootModel = "";
+  try {
+    const payload = typeof data === "string" ? JSON.parse(data) : data;
+    rootModel = payload?.extend?.root_model || "";
+  } catch {
+    // 请求体解析失败时退化为按路径缓存
+  }
+  return rootModel ? `${uri}#${rootModel}` : uri;
+}
+
+/**
  * 请求jimeng
  *
  * @param method 请求方法
@@ -209,6 +246,13 @@ async function requestCore(
   logger.info(`发送请求: ${method.toUpperCase()} ${fullUrl}`);
   logger.info(`请求参数: ${JSON.stringify(requestParams)}`);
 
+  // 浏览器传输：流式响应（对话类接口）保持直连，其余接口按配置决定是否走浏览器
+  const canUseBrowser = browserTransport.enabled && options.responseType != "stream";
+  const riskControlKey = getRiskControlKey(uri, options.data);
+  const useSafeSeedanceBrowser = canUseBrowser && supportsSeedanceBrowser(method, uri, options.data)
+    && (usesSeedanceBrowser(method, uri, options.data) || browserTransport.shouldUse(riskControlKey));
+  const useBrowser = canUseBrowser && !useSafeSeedanceBrowser && browserTransport.shouldUse(riskControlKey);
+
   // 添加重试逻辑
   let retries = 0;
   // A timed-out paid POST may already have created a job. Never replay it.
@@ -229,8 +273,21 @@ async function requestCore(
       }
 
       let response: AxiosResponse;
-      if (usesSeedanceBrowser(method, uri, options.data)) {
+      if (useSafeSeedanceBrowser) {
         response = await seedanceBrowser.request({ token, params: requestParams, headers, data: options.data, beforeSubmit: options.beforeSubmit, onSubmitting: options.onSubmitting, signal: signal as AbortSignal | undefined });
+      } else if (useBrowser) {
+        response = await browserTransport.request({
+          method,
+          url: fullUrl,
+          params: requestParams,
+          headers,
+          data: options.data,
+          cookiePairs: parseCookiePairs(generateCookie(token)),
+          signal,
+          retryOnFailure: !NON_RETRYABLE_PAID_POSTS.has(uri),
+          beforeSubmit: options.beforeSubmit,
+          onSubmitting: options.onSubmitting,
+        }) as AxiosResponse;
       } else {
         options.beforeSubmit?.();
         options.onSubmitting?.();
@@ -241,7 +298,7 @@ async function requestCore(
           headers: headers,
           timeout: 45000, // 增加超时时间到45秒
           validateStatus: () => true, // 允许任何状态码
-          ..._.omit(options, "params", "headers", "beforeSubmit", "onSubmitting"),
+          ..._.omit(options, "params", "headers", "beforeSubmit", "onSubmitting", "signal"),
           ...(signal ? { signal } : {}),
         });
       }
@@ -274,7 +331,40 @@ async function requestCore(
           const message = body.errmsg.replace(/https?:\/\/\S+|jm_[A-Za-z0-9_-]+|(?:sessionid|sessionid_ss|sid_tt|cookie|authorization|token|api[_-]?key)\s*[=:]\s*\S+|Bearer\s+\S+/gi, "[已隐藏]").slice(0, 180);
           videoSubmissionReceipts.set(error, { kind: "business-error", httpStatus: response.status, code, message, receivedAt: Date.now(), responseJsonHash: createHash("sha256").update(JSON.stringify(body)).digest("hex"), acceptanceIdentity: hasGenerationIdentity(body), ...(/^[a-fA-F0-9]{16,64}$/.test(String(body.logid || "")) ? { logId: String(body.logid) } : {}) });
         }
-        throw error;
+
+        // 付费提交收到明确风控拒绝后，只标记后续任务使用浏览器；当前任务不自动重提。
+        const riskControl =
+          error instanceof APIException && error.compare(EX.API_RISK_CONTROL_REJECTED);
+        if (!riskControl || !canUseBrowser || useBrowser || useSafeSeedanceBrowser || browserTransport.mode != "auto")
+          throw error;
+        if (NON_RETRYABLE_PAID_POSTS.has(uri)) {
+          browserTransport.markRequired(riskControlKey);
+          logger.warn(`模型链路 ${riskControlKey} 被上游风控拦截；已标记后续任务使用浏览器，当前付费请求不自动重新提交`);
+          throw error;
+        }
+        logger.warn(
+          `模型链路 ${riskControlKey} 被上游风控拦截，改用浏览器传输重试；也可设置 JIMENG_BROWSER_TRANSPORT=always 直接走浏览器`
+        );
+        try {
+          const browserResponse = await browserTransport.request({
+            method,
+            url: fullUrl,
+            params: requestParams,
+            headers,
+            data: options.data,
+            cookiePairs: parseCookiePairs(generateCookie(token)),
+            signal,
+          });
+          logger.info(`响应状态: ${browserResponse.status} ${browserResponse.statusText}`);
+          const result = checkResult(browserResponse as AxiosResponse);
+          browserTransport.markRequired(riskControlKey);
+          return result;
+        } catch (browserError) {
+          // 浏览器传输抛出业务错误时透传；基础设施错误（缺依赖、浏览器启动失败等）保留原始风控错误
+          if (browserError instanceof APIException) throw browserError;
+          logger.error(`浏览器传输不可用，保留原始风控错误: ${browserError instanceof Error ? browserError.message : "unknown"}`);
+          throw error;
+        }
       }
     }
     catch (error) {
@@ -649,6 +739,11 @@ export function checkResult(result: AxiosResponse) {
   // 即梦积分不足错误码：5000 (旧) 或 1006 (新)
   if ([5000, 1006].includes(Number(ret)))
     throw Object.assign(new APIException(EX.API_IMAGE_GENERATION_INSUFFICIENT_POINTS, `[积分不足]: ${errmsg} (错误码: ${ret})`), diagnostic);
+
+  // 上游风控拦截：Seedance 2.0 pro/fast 等链路要求携带浏览器端 SDK 生成的 a_bogus/msToken 签名
+  if ([4013, 1019].includes(Number(ret)))
+    throw Object.assign(new APIException(EX.API_RISK_CONTROL_REJECTED, `[风控拦截]: ${errmsg} (错误码: ${ret})`), diagnostic);
+
   throw Object.assign(new APIException(EX.API_REQUEST_FAILED, `[请求失败]: ${errmsg} (错误码: ${ret})`), diagnostic);
 }
 

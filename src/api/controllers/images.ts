@@ -294,6 +294,7 @@ export async function generateImages(
   logger.info(`   📏 尺寸: ${finalWidth}x${finalHeight} (${intelligentRatio ? "智能比例" : validRatio})`);
   logger.info(`   🔍 分辨率: ${resolutionType.toUpperCase()} | 精细度: ${sampleStrength}`);
   logger.info(`   🎯 模式: ${hasReferenceImages ? `混合(${uploadIDs.length} 张参考图)` : "文生图"}`);
+  logger.info(`   🖼️ 请求张数: ${n}`);
   logger.info(`═══════════════════════════════════════════════════════════\n`);
 
   if (!isPremiumFreeImageModel(model)) {
@@ -651,6 +652,9 @@ export async function generateImages(
   }
   if (retryCount >= MAX_POLL_RETRIES && resultUrls().length < n) {
     throw new APIException(EX.API_IMAGE_GENERATION_FAILED, "图像生成超时");
+  }
+  if (item_list.length > n) {
+    logger.warn(`⚠️ [生成张数] 请求 ${n} 张，上游实际返回 ${item_list.length} 张，请检查即梦积分消耗及请求数据`);
   }
   const urls = resultUrls();
   if (urls.length < n) throw new APIException(EX.API_IMAGE_GENERATION_FAILED, `即梦仅完成 ${urls.length}/${n} 张，未自动再次提交生成`);

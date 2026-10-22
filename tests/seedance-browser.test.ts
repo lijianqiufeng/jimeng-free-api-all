@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import axios from "axios";
-import { SeedanceBrowserTransport, seedanceBrowser, usesSeedanceBrowser } from "../src/lib/seedance-browser.ts";
+import { SeedanceBrowserTransport, seedanceBrowser, supportsSeedanceBrowser, usesSeedanceBrowser } from "../src/lib/seedance-browser.ts";
+import browserTransport from "../src/lib/browser-transport.ts";
 import { request } from "../src/api/controllers/core.ts";
 
 const origin = "https://jimeng.jianying.com", path = "/mweb/v1/aigc_draft/generate";
@@ -52,6 +53,7 @@ test("only explicitly enabled affected Seedance submissions use the browser", ()
     assert.equal(usesSeedanceBrowser("POST", "/mweb/v1/get_history_by_ids", input().data), false);
   } finally { delete process.env.JIMENG_BROWSER_TRANSPORT; }
   assert.equal(usesSeedanceBrowser("POST", path, input().data), false);
+  assert.ok(supportsSeedanceBrowser("POST", path, input().data));
 });
 
 test("official page accounts are isolated and only the exact payload is sent once", async () => {
@@ -95,10 +97,55 @@ test("core never retries browser risk rejection or uncertain submission through 
   process.env.JIMENG_BROWSER_TRANSPORT = "on";
   axios.defaults.adapter = async () => { direct++; throw Error("unmocked network forbidden"); };
   try {
+    await browserTransport.setMode("auto", false);
     seedanceBrowser.request = async () => { calls++; return { status: 200, statusText: "OK", headers: {}, config: {} as any, data: { ret: 4013, errmsg: "risk rejected" } }; };
     await assert.rejects(request("post", path, "fixture", { data: input().data }), /4013/);
     seedanceBrowser.request = async () => { calls++; throw Object.assign(Error("timeout"), { code: "ETIMEDOUT" }); };
     await assert.rejects(request("post", path, "fixture", { data: input().data }), /timeout/);
     assert.equal(calls, 2); assert.equal(direct, 0);
-  } finally { seedanceBrowser.request = old; axios.defaults.adapter = oldAdapter; delete process.env.JIMENG_BROWSER_TRANSPORT; }
+  } finally { await browserTransport.setMode("off", false); seedanceBrowser.request = old; axios.defaults.adapter = oldAdapter; delete process.env.JIMENG_BROWSER_TRANSPORT; }
+});
+
+test("auto mode marks a rejected paid model for the next task without replaying the current task", async () => {
+  const old = seedanceBrowser.request, oldAdapter = axios.defaults.adapter;
+  let direct = 0, browser = 0;
+  try {
+    await browserTransport.setMode("off", false);
+    await browserTransport.setMode("auto", false);
+    axios.defaults.adapter = async () => {
+      direct++;
+      return { status: 200, statusText: "OK", headers: {}, config: {}, data: { ret: 4013, errmsg: "risk rejected" } } as any;
+    };
+    seedanceBrowser.request = async () => {
+      browser++;
+      return { status: 200, statusText: "OK", headers: {}, config: {} as any, data: { ret: 0, data: { aigc_data: { history_record_id: "accepted" } } } };
+    };
+    await assert.rejects(request("post", path, "fixture", { data: input().data }), /4013/);
+    assert.deepEqual({ direct, browser }, { direct: 1, browser: 0 });
+    await request("post", path, "fixture", { data: input().data });
+    assert.deepEqual({ direct, browser }, { direct: 1, browser: 1 });
+  } finally { await browserTransport.setMode("off", false); seedanceBrowser.request = old; axios.defaults.adapter = oldAdapter; }
+});
+
+test("generic browser transport switches equal-length account cookies and never retries a protected POST", async () => {
+  const transport = browserTransport as any;
+  const applied: string[] = [];
+  let evaluations = 0;
+  try {
+    await browserTransport.setMode("off", false);
+    await browserTransport.setMode("always", false);
+    transport.context = { addCookies: async (cookies: any[]) => { applied.push(cookies.find(item => item.name === "sessionid")?.value); } };
+    transport.page = {
+      isClosed: () => false,
+      evaluate: async () => { evaluations++; return { status: 200, statusText: "OK", text: "{}" }; },
+    };
+    const base = { method: "POST", url: origin + path, params: {}, headers: {}, retryOnFailure: false };
+    await browserTransport.request({ ...base, cookiePairs: [["sessionid", "aaaaaaaa"]] });
+    await browserTransport.request({ ...base, cookiePairs: [["sessionid", "bbbbbbbb"]] });
+    assert.deepEqual(applied, ["aaaaaaaa", "bbbbbbbb"]);
+
+    transport.page.evaluate = async () => { evaluations++; return { status: 0, statusText: "", text: "", error: "timeout" }; };
+    await assert.rejects(browserTransport.request({ ...base, cookiePairs: [["sessionid", "bbbbbbbb"]] }), /timeout/);
+    assert.equal(evaluations, 3);
+  } finally { transport.browser = null; await browserTransport.setMode("off", false); }
 });
