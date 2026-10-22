@@ -14,6 +14,8 @@ globalThis.fetch = async () => new Response(media, { headers: { "content-length"
 childProcess.execFile = ((_file: string, args: string[], _options: unknown, callback: Function) => {
   assert.equal(_file, "ffprobe"); probePath = args.at(-1)!;
   callback(failed === "probe" ? Object.assign(Error("private probe output"), { code: "ENOENT" }) : null, JSON.stringify({ format: { duration }, streams: [{ codec_type: "video", width: 1280, height: 720, avg_frame_rate: fps }, { codec_type: "audio" }] }));
+  const child = { once(event: string, handler: Function) { if (event === "close") queueMicrotask(() => handler(failed === "probe" ? 1 : 0)); return child; } };
+  return child;
 }) as any;
 axios.defaults.adapter = async config => {
   const url = new URL(String(config.url)), phase = url.searchParams.get("Action") || url.searchParams.get("phase") || (url.pathname.includes("/passport/account/info/v2") ? "user" : "token");
@@ -106,6 +108,14 @@ test("every failed Inner upload phase is safe, terminal and cleans its temporary
     assert.equal(phases.filter(item => item === phase).length, 1);
     assert.equal(phases.at(-1), phase);
   }
+});
+
+test("a reference shorter than two seconds gives its exact duration without uploading; exactly two is accepted", async () => {
+  reset(); duration = 1.999;
+  await assert.rejects(uploadSeedanceReference("fixture-session", ref, 30, () => {}, "12345678"), /时长 1.999 秒，不足即梦要求的 2 秒.*未提交生成/);
+  assert.deepEqual(phases, []); assert.equal(existsSync(probePath), false);
+  reset(); duration = 2;
+  assert.equal((await uploadSeedanceReference("fixture-session", ref, 30, () => {}, "12345678")).duration, 2000);
 });
 test("mismatched uploaded metadata and cancellation do not proceed beyond the original upload", async () => {
   reset(); metaMismatch = true;

@@ -478,7 +478,7 @@ test("4013 cools the pinned account and does not switch accounts", async () => {
     assert.equal(row.credential, "");
     assert.equal(agentConversationSubmissions, 1);
     const cooldown = accountPool.get(riskAccount.id).cooldownUntil;
-    assert.ok(cooldown && Date.parse(cooldown) - Date.now() > 55 * 60_000);
+    assert.ok(!cooldown, "request risk must not cool the shared account");
     const result = await queryUpscaleTask(owner, id);
     assert.match(String(result.body.error), /4013/);
     assert.equal(JSON.stringify(result).includes("private-token"), false);
@@ -754,6 +754,34 @@ test("4K task persists its mode and cannot reuse the same ID as 8K", async () =>
   assert.equal((await createUpscaleTask(owner, authorization, { ...payload, resolution: "8k" })).status, 409);
   assert.equal(agentConversationSubmissions, 1);
   await until(() => readStatus(payload.id) === "succeeded", 8000);
+});
+
+test("terminal result refresh reads the exact original account and receipt without mutating history or resubmitting", async () => {
+  resetNetwork();
+  const account = isolateAccount("session-original-result-refresh");
+  const payload = { ...input, id: "upscale_original_refresh_123" };
+  await createUpscaleTask(owner, authorization, payload);
+  await until(() => readStatus(payload.id) === "succeeded", 8000);
+  database.prepare("UPDATE agent_upscale_tasks SET result=?,deadline=0 WHERE id=?").run(JSON.stringify([{ url: "https://fixture.invalid/expired.png" }]), payload.id);
+  const before = readRow(payload.id);
+  const accountBefore = database.prepare("SELECT last_used_at,selection_seq,cooldown_until,updated_at FROM jimeng_accounts WHERE id=?").get(account.id);
+  const submissions = agentConversationSubmissions;
+  const firstQueries = historyIdLookups.length;
+  assert.equal((await queryUpscaleTask(otherOwner, payload.id, true, account.id)).status, 404);
+  assert.equal((await queryUpscaleTask(owner, payload.id, true, "wrong-original-account")).status, 404);
+  assert.equal(historyIdLookups.length, firstQueries);
+  const fresh = await queryUpscaleTask(owner, payload.id, true, account.id);
+  assert.equal(fresh.status, 200);
+  assert.equal(fresh.body.status, "succeeded");
+  assert.equal(fresh.body.data[0].url, RESULT_URL);
+  assert.equal(agentConversationSubmissions, submissions);
+  assert.deepEqual(readRow(payload.id), before);
+  assert.deepEqual(database.prepare("SELECT last_used_at,selection_seq,cooldown_until,updated_at FROM jimeng_accounts WHERE id=?").get(account.id), accountBefore);
+  database.prepare("UPDATE agent_upscale_tasks SET status='failed',error='等待超时，未重新生成' WHERE id=?").run(payload.id);
+  const failedBefore = readRow(payload.id);
+  assert.equal((await queryUpscaleTask(owner, payload.id, true, account.id)).body.status, "succeeded");
+  assert.deepEqual(readRow(payload.id), failedBefore);
+  assert.equal(agentConversationSubmissions, submissions);
 });
 
 test("submitting row past deadline without conversation is fail-closed without a paid POST", async () => {

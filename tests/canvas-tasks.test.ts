@@ -154,14 +154,14 @@ test("risk control is clearly reported without exposing raw errors or retrying",
     assert.equal(submissions, 3);
     const row = database.prepare("SELECT account_id FROM canvas_tasks WHERE id = ?").get(id) as any;
     const cooldown = accountPool.get(row.account_id).cooldownUntil;
-    assert.ok(cooldown && Date.parse(cooldown) - Date.now() > 55 * 60_000);
+    assert.ok(!cooldown, "request risk must not cool the shared account");
     accountPool.markSuccess(row.account_id);
     assert.equal(accountPool.get(row.account_id).cooldownUntil, cooldown);
   } finally {
     submissionRet = "0";
   }
 });
-test("query authentication failures cool the pinned account while retaining the task", async () => {
+test("query risk retains the pinned task without cooling the shared account", async () => {
   const id = "canvas_query_risk_1234567890";
   await createTask(owner, authorization, { ...input, id });
   await until(() => (database.prepare("SELECT status FROM canvas_tasks WHERE id = ?").get(id) as any)?.status === "running");
@@ -170,7 +170,7 @@ test("query authentication failures cool the pinned account while retaining the 
   const result = await queryTask(owner, id);
   historyRet = "0";
   assert.equal((result.body as any).status, "running");
-  assert.ok(Date.parse(accountPool.get(row.account_id).cooldownUntil || "") > Date.now());
+  assert.ok(!accountPool.get(row.account_id).cooldownUntil);
 });
 test("HTTP authentication failures cool only the task's pinned account", async () => {
   accountPool.create({ name: "http auth account_高级", sessionId: "http-auth-account-session" });

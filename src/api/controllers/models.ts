@@ -1,6 +1,7 @@
 import logger from "@/lib/logger.ts";
 import util from "@/lib/util.ts";
 import { request } from "./core.ts";
+import { isLongVideo, seedanceVideoBenefit } from "./seedance-contract.ts";
 
 export type JimengModelType = "image" | "video";
 
@@ -19,6 +20,8 @@ export interface JimengModelConfig {
   supportsLongDuration?: boolean;
   defaultDuration?: number;
   supportedDurations?: number[];
+  mode?: "long";
+  durationRange?: { min: number; max: number; step: number };
   source?: "static" | "dynamic";
   raw?: any;
 }
@@ -43,6 +46,7 @@ const IMAGE_REQ_KEY_IDS: Record<string, string> = {
 
 const VIDEO_REQ_KEY_IDS: Record<string, string> = {
   dreamina_seedance_45_pro: "jimeng-video-seedance-2.5",
+  dreamina_seedance_45_pro_draft: "jimeng-video-seedance-2.5-draft",
   dreamina_seedance_40_mini: "jimeng-video-seedance-2.0-mini",
   dreamina_seedance_40: "jimeng-video-seedance-2.0-fast",
   dreamina_seedance_40_pro: "jimeng-video-seedance-2.0",
@@ -170,6 +174,17 @@ const STATIC_IMAGE_MODELS: JimengModelConfig[] = [
 ];
 
 const STATIC_VIDEO_MODELS: JimengModelConfig[] = [
+  {
+    id: "jimeng-video-seedance-2.5-draft",
+    type: "video",
+    name: "Seedance 2.5 样片",
+    description: "即梦 Seedance 2.5 480p 样片模式",
+    modelReqKey: "dreamina_seedance_45_pro_draft",
+    defaultResolution: "480p",
+    supportedResolutions: ["480p"],
+    supportsLongDuration: true,
+    source: "static",
+  },
   {
     id: "jimeng-video-seedance-2.5",
     type: "video",
@@ -630,6 +645,20 @@ function parseVideoModel(candidate: any): JimengModelConfig | null {
   };
 }
 
+/** Long video shares the official model key, but never its ordinary duration or price. */
+function longVideoModel(model: JimengModelConfig): JimengModelConfig | null {
+  const raw = model.raw, option = raw?.options?.find((item: any) => item.key === "long_video");
+  const media = raw?.options?.find((item: any) => item.key === "input_media_type")?.enum_val;
+  const resolution = raw?.options?.find((item: any) => item.key === "resolution")?.enum_val;
+  const range = option?.long_video_config?.duration_ms;
+  if (model.modelReqKey !== "dreamina_seedance_45_pro" || raw?.model_status !== 0 || option?.forbidden_display !== false || !media?.string_value?.includes("long_video") || media.disabled_string_value?.includes("long_video") || !resolution?.string_value?.includes("720p") || resolution.disabled_string_value?.includes("720p")) return null;
+  if (!range || ![range.min, range.max, range.step, range.default].every(value => Number.isSafeInteger(value) && value > 0 && value % 1000 === 0) || range.min > range.max || range.step > range.max) return null;
+  const durations = Array.from({ length: 151 }, (_, index) => index + 30).filter(seconds => seconds * 1000 >= range.min && seconds * 1000 <= range.max && (seconds * 1000 - range.min) % range.step === 0);
+  const id = "jimeng-video-seedance-2.5-long", benefit = seedanceVideoBenefit(id, "720p", true, raw);
+  if (!durations.length || !benefit || !seedanceVideoBenefit(id, "720p", false, raw)) return null;
+  return { ...model, id, name: "Seedance 2.5 超长视频 Beta", description: "即梦 Seedance 2.5 超长视频，按当前账号能力与专属报价提交", mode: "long", supportedResolutions: ["720p"], defaultResolution: "720p", supportedDurations: durations, defaultDuration: durations.includes(range.default / 1000) ? range.default / 1000 : durations[0], durationRange: { min: durations[0], max: durations.at(-1)!, step: range.step / 1000 }, benefits: { "720p": benefit }, defaultBenefit: benefit };
+}
+
 function uniqueModels(models: JimengModelConfig[]) {
   const byKey = new Map<string, JimengModelConfig>();
   for (const model of models) {
@@ -661,11 +690,11 @@ async function fetchImageModelConfigs(refreshToken: string, refresh = false) {
   );
 }
 
-async function fetchVideoModelConfigs(refreshToken: string, refresh = false) {
+export async function fetchVideoModelConfigs(refreshToken: string, refresh = false) {
   const result = await request("post", "/mweb/v1/video_generate/get_common_config", refreshToken, {
     params: {
       web_version: WEB_VERSION,
-      da_version: DRAFT_VERSION,
+      da_version: "3.3.28",
       aigc_features: "app_lip_sync",
       needRefresh: refresh,
     },
@@ -678,11 +707,12 @@ async function fetchVideoModelConfigs(refreshToken: string, refresh = false) {
     },
   });
 
-  return uniqueModels(
+  const models = uniqueModels(
     findObjectsWithModelReqKey(result)
       .map(parseVideoModel)
       .filter(Boolean) as JimengModelConfig[]
   );
+  return models.flatMap(model => { const long = longVideoModel(model); return long ? [model, long] : [model]; });
 }
 
 async function fetchDynamicModelConfigs(refreshToken: string, refresh = false) {
@@ -735,7 +765,7 @@ function mergeModelConfigs(staticModels: JimengModelConfig[], dynamicModels: Jim
   }
 
   for (const model of dynamicModels) {
-    const staticMatch = byReqKey.get(`${model.type}:${model.modelReqKey}`);
+    const staticMatch = isLongVideo(model.id) ? undefined : byReqKey.get(`${model.type}:${model.modelReqKey}`);
     const merged = cloneModelConfig({
       ...(staticMatch || {}),
       ...model,
@@ -791,6 +821,7 @@ export async function resolveModelConfig(
         model.aliases?.includes(modelIdOrReqKey)
   );
   if (matched) return matched;
+  if (isLongVideo(modelIdOrReqKey)) throw Error("当前账号未确认可用超长视频模式，未提交生成");
   const staticMatch = getStaticModelConfig(modelIdOrReqKey, type);
   if (staticMatch) return staticMatch;
   if (type === "image") throw Error("不支持的即梦图片模型，未提交生成");
@@ -804,6 +835,7 @@ export function getStaticModelReqKey(
   modelIdOrReqKey: string,
   type: JimengModelType
 ) {
+  if (type === "video" && isLongVideo(modelIdOrReqKey)) return "dreamina_seedance_45_pro";
   return getStaticModelConfig(modelIdOrReqKey, type)?.modelReqKey;
 }
 
@@ -818,6 +850,7 @@ export function toOpenAIModel(model: JimengModelConfig) {
     supported_resolutions: model.supportedResolutions,
     default_resolution: model.defaultResolution,
     source: model.source || "static",
+    ...(model.mode === "long" ? { mode: model.mode, duration_range: model.durationRange, supported_durations: model.supportedDurations } : {}),
   };
 }
 

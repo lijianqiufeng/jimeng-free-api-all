@@ -1,0 +1,136 @@
+{
+  "model_req_key": "dreamina_seedance_45_pro_draft",
+  "model_status": 0,
+  "commercial_config": {
+    "default": {
+      "resource_sub_type": "aigc",
+      "resource_id_type": "str",
+      "resource_id": "generate_video",
+      "benefit_type": "seedance_25_draft_480p_output",
+      "amount": 0
+    },
+    "format": "",
+    "format_conf": {},
+    "additional_conf": null,
+    "resolution_price_configs": [
+      {
+        "resolution": "480p",
+        "price": {
+          "resource_sub_type": "aigc",
+          "resource_id_type": "str",
+          "resource_id": "generate_video",
+          "benefit_type": "seedance_25_draft_480p_output",
+          "amount": 0
+        },
+        "no_input_video_price": {
+          "resource_sub_type": "aigc",
+          "resource_id_type": "str",
+          "resource_id": "generate_video",
+          "benefit_type": "seedance_25_draft_480p_no_input_video_output",
+          "amount": 0
+        }
+      },
+      {
+        "resolution": "1080p",
+        "price": {
+          "resource_sub_type": "aigc",
+          "resource_id_type": "str",
+          "resource_id": "generate_video",
+          "benefit_type": "seedance_25_draft_1080p_output",
+          "amount": 0
+        },
+        "no_input_video_price": {
+          "resource_sub_type": "aigc",
+          "resource_id_type": "str",
+          "resource_id": "generate_video",
+          "benefit_type": "seedance_25_draft_1080p_no_input_video_output",
+          "amount": 0
+        }
+      }
+    ]
+  },
+  "extra": {
+    "is_draft_mode": true
+  },
+  "options": [
+    {
+      "key": "resolution",
+      "value_type": "enum",
+      "enum_val": {
+        "enum_type": "string",
+        "string_value": [
+          "480p"
+        ],
+        "double_value": null,
+        "int_value": null,
+        "default_val_idx": 0
+      },
+      "forbidden_display": false,
+      "lens_motion_val": null
+    },
+    {
+      "key": "frames",
+      "value_type": "enum",
+      "enum_val": {
+        "enum_type": "int",
+        "string_value": null,
+        "double_value": null,
+        "int_value": [
+          96,
+          120,
+          144,
+          168,
+          192,
+          216,
+          240,
+          264,
+          288,
+          312,
+          336,
+          360,
+          384,
+          408,
+          432,
+          456,
+          480,
+          504,
+          528,
+          552,
+          576,
+          600,
+          624,
+          648,
+          672,
+          696,
+          720
+        ],
+        "default_val_idx": 0
+      },
+      "forbidden_display": false,
+      "lens_motion_val": null
+    },
+    {
+      "key": "generate_from_draft_config",
+      "value_type": "generate_from_draft_config",
+      "forbidden_display": false,
+      "lens_motion_val": null,
+      "generate_from_draft_config_val": {
+        "resolution": {
+          "enum_type": "string",
+          "string_value": [
+            "720p",
+            "1080p",
+            "4k"
+          ],
+          "double_value": null,
+          "int_value": null,
+          "default_val_idx": 1,
+          "disabled_string_value": [
+            "720p",
+            "4k"
+          ]
+        }
+      }
+    }
+  ]
+}

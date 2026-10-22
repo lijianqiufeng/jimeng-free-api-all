@@ -138,6 +138,21 @@
       .form-card .btn { width: 100%; }
       .account-table-panel { min-width: 0; }
       .account-table-panel .panel-head { padding-bottom: 16px; }
+      .video-queue { margin-bottom: 18px; padding: 22px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 390px); gap: 30px; }
+      .video-queue h3 { font-size: 15px; }
+      .queue-numbers { display: flex; gap: 26px; margin: 17px 0; }
+      .queue-numbers strong { display: block; font-size: 26px; font-variant-numeric: tabular-nums; }
+      .queue-numbers span, .queue-help, .queue-account { color: var(--text-soft); font-size: 12px; line-height: 1.7; }
+      .queue-numbers .queue-unknown { color: var(--yellow); }
+      .queue-accounts { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 12px; }
+      .queue-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .queue-fields label { display: block; color: var(--text-soft); font-size: 12px; margin-bottom: 7px; }
+      .queue-fields input { padding: 10px 12px; }
+      .queue-footer { display: flex; justify-content: flex-end; align-items: center; gap: 9px; margin-top: 14px; }
+      .queue-footer .btn { padding: 8px 13px; font-size: 12px; }
+      .queue-message { min-height: 18px; margin-top: 10px; color: var(--text-faint); font-size: 11px; line-height: 1.6; }
+      .queue-message.is-error { color: var(--yellow); }
+      @media (max-width: 760px) { .video-queue { grid-template-columns: 1fr; gap: 18px; } }
 
       /* 生图测试 */
       .image-test-layout { display: grid; grid-template-columns: minmax(320px, .82fr) minmax(0, 1.5fr); gap: 18px; align-items: start; }
@@ -269,6 +284,20 @@
           <div class="stat-card"><div class="stat-label">已停用</div><div id="account-disabled" class="stat-value">0</div><div class="stat-note">不会参与轮询</div></div>
           <div class="stat-card"><div class="stat-label">Cookie 安全</div><div class="stat-value" style="font-size:22px">已加密</div><div class="stat-note">服务端仅保存加密凭证</div></div>
         </div>
+        <div class="panel video-queue" id="video-queue">
+          <div>
+            <h3>视频调度</h3>
+            <div class="queue-numbers" aria-live="polite"><div><strong id="queue-active">—</strong><span>上传与提交</span></div><div><strong id="queue-rendering">—</strong><span>官网生成中</span></div><div><strong id="queue-waiting">—</strong><span>等待派发</span></div><div><strong id="queue-uncertain" class="queue-unknown">—</strong><span>回执待确认</span></div></div>
+            <p class="queue-help">同一账号依次上传、提交。即梦正式任务编号保存后，余额与报价符合条件便派发下一条，无需等前一条成片。已受理任务继续按原编号查询，积分预留保留到核账；提交回执未知仍暂停该账号派发。官网生成并发上限尚未确认。</p>
+            <div id="queue-accounts" class="queue-accounts"></div>
+          </div>
+          <div>
+            <div class="queue-fields"><div><label for="queue-per-account">每账号提交并发保存值</label><input id="queue-per-account" type="number" min="1" max="100" step="1" inputmode="numeric" value="1" disabled oninput="editVideoQueue()" /></div><div><label for="queue-total">总提交并发上限 · 可选</label><input id="queue-total" type="number" min="1" max="100" step="1" inputmode="numeric" placeholder="自动按账号槽位" disabled oninput="editVideoQueue()" /></div></div>
+            <p class="queue-help" style="margin-top:10px">每账号上传与提交实际串行 1 条，保留原配置值。总上限只限制同时准备提交的数量，已取得正式编号的生成任务不占提交槽；不取消任务或换号重提。</p>
+            <div class="queue-footer"><button class="btn btn-secondary" type="button" onclick="reloadVideoQueue()">刷新配置</button><button id="queue-save" class="btn btn-primary" type="button" disabled onclick="saveVideoQueue()">保存设置</button></div>
+            <div id="queue-message" class="queue-message" role="status">正在读取调度配置…</div>
+          </div>
+        </div>
         <div class="account-layout">
           <div class="form-card"><h3>添加即梦账号</h3><p>建议为账号设置容易识别的名称。Cookie 不会回显到页面。</p><div class="form-group"><label for="account-name">账号名称</label><input id="account-name" type="text" placeholder="例如：主账号、备用账号 1" /></div><div class="form-group"><label for="account-cookie">Cookie</label><textarea id="account-cookie" rows="5" placeholder="粘贴包含 sessionid 的 Cookie"></textarea></div><button class="btn btn-primary" onclick="createAccount()">保存到账号池</button></div>
           <div class="panel account-table-panel"><div class="panel-head"><div><h3>账号列表</h3><p>可单独启用、停用或刷新会员状态</p></div></div><div class="notice">Cookie 属于敏感凭证，请勿分享给他人。账号状态查询失败时，可点击“刷新状态”重试。</div><div class="table-scroll"><table><thead><tr><th>名称</th><th>凭证</th><th>状态</th><th>免费积分</th><th>会员状态</th><th>操作</th></tr></thead><tbody id="accounts-table"></tbody></table></div></div>
@@ -362,6 +391,7 @@ Content-Type: application/json</div>
     <script src="/upscale-ui.js"></script>
     <script>
       let currentMediaPage = 1, currentMediaType = "", autoRefreshInterval, toastTimer;
+      let videoQueueVersion = null, videoQueueDirty = false, videoQueueSaving = false;
       const UPSCALE_TASK_KEY = "jimengUpscaleTaskId";
       let upscaleOriginalUrl = "", upscalePollTimer = 0, upscaleSelectedFile = null;
       const $ = (id) => document.getElementById(id);
@@ -391,7 +421,34 @@ Content-Type: application/json</div>
       function membershipText(value) { if (!value) return "未知"; if (typeof value === "string") return value; return value.name || value.plan || value.level || (value.isVip ? "会员" : "普通账号"); }
       function apiError(payload, fallback) { return payload?.message || payload?.error || payload?.data?.message || fallback; }
       function isApiFailure(payload) { return payload && typeof payload.code === "number" && payload.code !== 0; }
-      async function loadAccounts() { try { const res = await fetch("/account-pool/", { credentials: "include" }); const payload = await res.json(); if (!res.ok || isApiFailure(payload) || !Array.isArray(payload)) { showToast(apiError(payload, "账号列表读取失败")); return; } const accounts = payload; const active = accounts.filter((a) => a.enabled).length; $("account-total").textContent = accounts.length; $("account-active").textContent = active; $("account-disabled").textContent = accounts.length - active; $("accounts-table").innerHTML = accounts.map((a) => `<tr><td><strong>${esc(a.name || "未命名账号")}</strong></td><td><code>${esc(a.credentialPreview || "********")}</code></td><td>${badge(a.enabled)}</td><td>${esc(a.status?.totalCredit ?? "—")}</td><td>${esc(membershipText(a.status?.membership))}</td><td><div class="row-actions"><button class="btn btn-secondary" onclick="setAccountStatus('${esc(a.id)}', ${!a.enabled})">${a.enabled ? "停用" : "启用"}</button><button class="btn btn-secondary" onclick="refreshAccount('${esc(a.id)}')">刷新状态</button><button class="btn btn-danger" onclick="deleteAccount('${esc(a.id)}')">删除</button></div></td></tr>`).join("") || emptyRow(6, "还没有账号，请从左侧添加"); } catch (e) { console.error(e); showToast("账号列表读取失败"); } }
+      function editVideoQueue() { videoQueueDirty = true; $("queue-save").disabled = videoQueueVersion === null || videoQueueSaving; }
+      function renderVideoQueue(data) {
+        $("queue-active").textContent = data.active; $("queue-rendering").textContent = data.rendering; $("queue-waiting").textContent = data.queued; $("queue-uncertain").textContent = data.uncertain;
+        $("queue-accounts").innerHTML = data.accounts.map(account => `<span class="queue-account">${esc(account.name)} · ${account.active}/${data.effectivePerAccountConcurrency} 提交${account.rendering ? ` · ${account.rendering} 生成中` : ""}${account.billingPending ? ` · ${account.billingPending} 待核账` : ""}${account.enabled ? "" : " · 已停用"}${account.uncertain ? ` · ${account.uncertain} 待确认` : ""}</span>`).join("") || '<span class="queue-account">暂无高级或超级账号</span>';
+        if (!videoQueueDirty && !videoQueueSaving && (videoQueueVersion === null || data.settings.version >= videoQueueVersion)) {
+          videoQueueVersion = data.settings.version; $("queue-per-account").value = data.settings.perAccountConcurrency; $("queue-total").value = data.settings.totalConcurrency ?? "";
+          $("queue-per-account").disabled = $("queue-total").disabled = false;
+          $("queue-message").className = "queue-message"; $("queue-message").textContent = `${({ administrator: "管理员设置", environment: "运维配置", default: "默认设置" })[data.settings.source]}${data.settings.updatedAt ? " · " + dateText(data.settings.updatedAt) : ""}`;
+        }
+        if (videoQueueDirty && data.settings.version !== videoQueueVersion) { $("queue-message").className = "queue-message is-error"; $("queue-message").textContent = `配置已由其他管理员更新为每账号 ${data.settings.perAccountConcurrency}、总上限 ${data.settings.totalConcurrency ?? "自动"}；本地输入已保留，请核对后刷新配置。`; }
+      }
+      async function loadVideoQueue() {
+        try { const res = await fetch("/dashboard/video-queue", { credentials: "include" }); const data = await res.json(); if (!res.ok || isApiFailure(data)) throw Error(apiError(data, "视频调度读取失败")); renderVideoQueue(data); }
+        catch (error) { $("queue-message").className = "queue-message is-error"; $("queue-message").textContent = error.message || "视频调度暂不可用"; }
+      }
+      function reloadVideoQueue() { if (videoQueueSaving || videoQueueDirty && !confirm("刷新配置会用最新设置替换当前未保存的输入，继续吗？")) return; videoQueueDirty = false; loadVideoQueue(); }
+      async function saveVideoQueue() {
+        const perAccountConcurrency = Number($("queue-per-account").value), totalText = $("queue-total").value.trim(), totalConcurrency = totalText ? Number(totalText) : null;
+        if (!Number.isInteger(perAccountConcurrency) || perAccountConcurrency < 1 || perAccountConcurrency > 100 || totalConcurrency !== null && (!Number.isInteger(totalConcurrency) || totalConcurrency < 1 || totalConcurrency > 100)) return showToast("并发数须为 1–100 的整数，总上限可留空");
+        videoQueueSaving = true; $("queue-save").disabled = true;
+        try {
+          const res = await fetch("/dashboard/video-queue", { method: "PUT", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ perAccountConcurrency, totalConcurrency, expectedVersion: videoQueueVersion }) });
+          const data = await res.json(); if (!res.ok || isApiFailure(data)) throw Error(apiError(data, "保存失败"));
+          videoQueueDirty = false; videoQueueSaving = false; renderVideoQueue(data); showToast("调度设置已保存，仅影响新任务");
+        } catch (error) { $("queue-message").className = "queue-message is-error"; $("queue-message").textContent = (error.message || "保存回执未确认，请刷新配置核对，不会自动重试") + "；当前输入已保留"; }
+        finally { videoQueueSaving = false; $("queue-save").disabled = !videoQueueDirty; }
+      }
+      async function loadAccounts() { void loadVideoQueue(); try { const res = await fetch("/account-pool/", { credentials: "include" }); const payload = await res.json(); if (!res.ok || isApiFailure(payload) || !Array.isArray(payload)) { showToast(apiError(payload, "账号列表读取失败")); return; } const accounts = payload; const active = accounts.filter((a) => a.enabled).length; $("account-total").textContent = accounts.length; $("account-active").textContent = active; $("account-disabled").textContent = accounts.length - active; $("accounts-table").innerHTML = accounts.map((a) => `<tr><td><strong>${esc(a.name || "未命名账号")}</strong></td><td><code>${esc(a.credentialPreview || "********")}</code></td><td>${badge(a.enabled)}</td><td>${esc(a.status?.totalCredit ?? "—")}</td><td>${esc(membershipText(a.status?.membership))}</td><td><div class="row-actions"><button class="btn btn-secondary" onclick="setAccountStatus('${esc(a.id)}', ${!a.enabled})">${a.enabled ? "停用" : "启用"}</button><button class="btn btn-secondary" onclick="refreshAccount('${esc(a.id)}')">刷新状态</button><button class="btn btn-danger" onclick="deleteAccount('${esc(a.id)}')">删除</button></div></td></tr>`).join("") || emptyRow(6, "还没有账号，请从左侧添加"); } catch (e) { console.error(e); showToast("账号列表读取失败"); } }
       async function createAccount() { const name = $("account-name").value.trim(), cookie = $("account-cookie").value.trim(); if (!name || !cookie) return showToast("请填写账号名称和 Cookie"); try { const res = await fetch("/account-pool/", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, cookie }) }); const data = await res.json(); if (!res.ok || isApiFailure(data)) return showToast(apiError(data, "添加账号失败")); $("account-name").value = ""; $("account-cookie").value = ""; await loadAccounts(); showToast("账号已加入账号池"); } catch (e) { console.error(e); showToast("添加账号失败，请检查服务日志"); } }
       async function setAccountStatus(id, enabled) { const res = await fetch(`/account-pool/${id}/enabled`, { method: "PATCH", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) }); if (res.ok) { loadAccounts(); showToast(enabled ? "账号已启用" : "账号已停用"); } }
       async function refreshAccount(id) { const res = await fetch(`/account-pool/${id}/refresh-status`, { method: "POST", credentials: "include" }); const data = await res.json(); if (!res.ok || isApiFailure(data)) showToast(apiError(data, "状态查询失败")); else showToast("账号状态已更新"); loadAccounts(); }

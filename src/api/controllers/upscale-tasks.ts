@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { database, saveMedia } from "@/lib/database.ts";
-import { encrypt, decrypt, markFailure, markSuccess } from "@/lib/account-pool.ts";
+import { encrypt, decrypt, markFailure, markSuccess, readAccountSessionById } from "@/lib/account-pool.ts";
 import util from "@/lib/util.ts";
 import logger from "@/lib/logger.ts";
 import { accountFailureCooldown, resolveAuthorization } from "./auth.ts";
@@ -36,7 +36,6 @@ const DEADLINE_MS = 10 * 60_000;
 const NO_PROGRESS_DEADLINE_MS = 10 * 60_000;
 const QUERY_THROTTLE_MS = 5000;
 const HISTORY_POLL_MS = 30_000;
-const RISK_COOLDOWN_MS = 60 * 60_000;
 
 type UpscaleTask = {
   id: string;
@@ -281,7 +280,7 @@ function classifySubmitFailure(id: string, error: unknown, paidAttempted: boolea
   const task = get(id);
   if (!active(task)) return;
   if (isRisk4013(error)) {
-    failTask(id, RISK_4013, error, RISK_COOLDOWN_MS);
+    failTask(id, RISK_4013, error);
     return;
   }
   if (paidAttempted && isAmbiguousNetworkError(error) && !task!.provider_task_id) {
@@ -353,7 +352,7 @@ async function runMonitor(id: string, context?: { observation?: AgentObservation
     nextHistoryAt = Date.now() + HISTORY_POLL_MS;
     void refreshHistory(id, token, observation).then(() => applyTerminal(id, observation)).catch((error) => {
       if (Date.now() >= (get(id)?.deadline ?? Infinity)) { void finishWaiting(); return; }
-      if (isRisk4013(error)) failTask(id, RISK_4013, error, RISK_COOLDOWN_MS);
+      if (isRisk4013(error)) failTask(id, RISK_4013, error);
       else {
         const current = get(id);
         const cooldown = accountFailureCooldown(error);
@@ -366,7 +365,7 @@ async function runMonitor(id: string, context?: { observation?: AgentObservation
     try { if (observation.historyId || !context) await refreshHistory(id, token, observation); } catch (error) {
       if (Date.now() >= (get(id)?.deadline ?? Infinity)) { await finishWaiting(); return; }
       if (isRisk4013(error)) {
-        failTask(id, RISK_4013, error, RISK_COOLDOWN_MS);
+        failTask(id, RISK_4013, error);
         return;
       }
       const cooldown = accountFailureCooldown(error);
@@ -382,7 +381,7 @@ async function runMonitor(id: string, context?: { observation?: AgentObservation
       try { await refreshHistory(id, token, observation); } catch (error) {
         if (Date.now() >= (get(id)?.deadline ?? Infinity)) { await finishWaiting(); return; }
         if (isRisk4013(error)) {
-          failTask(id, RISK_4013, error, RISK_COOLDOWN_MS);
+          failTask(id, RISK_4013, error);
           return;
         }
         const cooldown = accountFailureCooldown(error);
@@ -435,7 +434,7 @@ async function consumePaidStream(
       const cooldown = accountFailureCooldown(error);
       if (task.account_id && cooldown != null) markFailure(task.account_id, cooldown);
       if (isRisk4013(error)) {
-        failTask(id, RISK_4013, error, RISK_COOLDOWN_MS);
+        failTask(id, RISK_4013, error);
         return;
       }
     }
@@ -507,9 +506,24 @@ export async function createUpscaleTask(owner: number, authorization: string, bo
   return { status: 202, body: publicTask(get(input.id)!) };
 }
 
-export async function queryUpscaleTask(owner: number, id: string) {
+export async function queryUpscaleTask(owner: number, id: string, refreshResult = false, requestedAccountId?: string) {
   let task = get(id);
   if (!task || task.owner !== owner) return { status: 404, body: { error: NOT_FOUND } };
+  if (requestedAccountId && requestedAccountId !== task.account_id) return { status: 404, body: { error: NOT_FOUND } };
+  if (refreshResult && ["succeeded", "failed"].includes(task.status)) {
+    if (!task.account_id || requestedAccountId !== task.account_id || !task.workspace_id || !task.conversation_id || !task.provider_task_id || !task.history_id) return { status: 409, body: { error: "原高清回执不完整，未重新生成" } };
+    const observation = restoreObservation(task);
+    try {
+      const token = readAccountSessionById(task.account_id);
+      const result = await queryAgentHistory(token, observation, AbortSignal.timeout(15_000), task.workspace_id);
+      if (result.status !== "succeeded" || observation.historyId !== task.history_id || observation.submitId !== task.provider_task_id) return { status: 503, body: { error: "原高清结果暂时无法读取，未重新生成" } };
+      const current = get(id);
+      if (!current || current.status !== task.status || current.account_id !== task.account_id || current.history_id !== task.history_id || current.provider_task_id !== task.provider_task_id || current.workspace_id !== task.workspace_id || current.conversation_id !== task.conversation_id) return { status: 409, body: { error: "原高清任务已变化，未重新生成" } };
+      return { status: 200, body: { ...publicTask(current), status: "succeeded", error: undefined, data: result.urls.map((url) => ({ url })) } };
+    } catch {
+      return { status: 503, body: { error: "原高清结果暂时无法读取，未重新生成" } };
+    }
+  }
   if (task.status === "submitting" && task.conversation_id && !inflightPaid.has(id)) task = promoteReadOnly(task);
   if (active(task) && !inflightPaid.has(id) && (Date.now() >= task.deadline || (task.credential && Date.now() - task.checked_at >= QUERY_THROTTLE_MS))) {
     database.prepare("UPDATE agent_upscale_tasks SET checked_at = ? WHERE id = ?").run(Date.now(), id);

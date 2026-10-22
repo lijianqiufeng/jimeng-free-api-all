@@ -1,4 +1,7 @@
 import { PassThrough } from "stream";
+import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { setTimeout as delay } from "node:timers/promises";
 import path from "path";
 import _ from "lodash";
 import mime from "mime";
@@ -10,6 +13,29 @@ import { createParser } from "eventsource-parser";
 import logger from "@/lib/logger.ts";
 import util from "@/lib/util.ts";
 import { seedanceBrowser, usesSeedanceBrowser } from "@/lib/seedance-browser.ts";
+
+type VideoSubmissionReceipt = { kind: "business-error"; httpStatus: number; code: number; message: string; receivedAt: number; responseJsonHash: string; acceptanceIdentity: boolean; logId?: string };
+const videoSubmissionReceipts = new WeakMap<Error, VideoSubmissionReceipt>();
+export const videoSubmissionReceipt = (error: unknown) => error instanceof Error ? videoSubmissionReceipts.get(error) : undefined;
+const videoRequestScope = new AsyncLocalStorage<{ signal: AbortSignal; pending: Set<Promise<unknown>> }>();
+export const videoRequestSignal = () => videoRequestScope.getStore()?.signal;
+export async function drainVideoRequests() {
+  const scope = videoRequestScope.getStore();
+  while (scope?.pending.size) await Promise.allSettled([...scope.pending]);
+}
+export async function withVideoRequestSignal<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+  const scope = { signal, pending: new Set<Promise<unknown>>() };
+  return videoRequestScope.run(scope, async () => {
+    try { return await operation(); }
+    finally { await drainVideoRequests(); }
+  });
+}
+
+function hasGenerationIdentity(value: unknown): boolean {
+  return Boolean(value && typeof value === "object" && Object.entries(value).some(([key, item]) =>
+    /^(?:id|history_record_id|history_id|historyId|task_id|taskId|submit_id|submitId|draft_id|draftId|url|video_url|play_url|download_url)$/.test(key) && item !== null && item !== undefined && item !== "" || hasGenerationIdentity(item)
+  ));
+}
 
 // 模型名称
 const MODEL_NAME = "jimeng";
@@ -138,12 +164,24 @@ export async function receiveCredit(refreshToken: string) {
  * @param params 请求参数
  * @param headers 请求头
  */
-export async function request(
+export function request(method: string, uri: string, refreshToken: string, options: AxiosRequestConfig & { beforeSubmit?: () => void; onSubmitting?: () => void } = {}) {
+  const work = requestCore(method, uri, refreshToken, options), scope = videoRequestScope.getStore();
+  if (scope) {
+    scope.pending.add(work);
+    void work.then(() => scope.pending.delete(work), () => scope.pending.delete(work));
+  }
+  return work;
+}
+
+async function requestCore(
   method: string,
   uri: string,
   refreshToken: string,
   options: AxiosRequestConfig & { beforeSubmit?: () => void; onSubmitting?: () => void } = {}
 ) {
+  const taskSignal = videoRequestSignal();
+  const signal = (taskSignal && options.signal ? AbortSignal.any([taskSignal, options.signal as AbortSignal]) : taskSignal || options.signal) as AbortSignal | undefined;
+  if (signal?.aborted) throw signal.reason || new Error("视频请求已中断");
   const token = await acquireToken(refreshToken);
   const deviceTime = util.unixTimestamp();
   const sign = util.md5(
@@ -178,7 +216,8 @@ export async function request(
     "/mweb/v1/aigc_draft/generate",
     "/mweb/v1/creation_agent/v2/conversation",
   ]);
-  const maxRetries = NON_RETRYABLE_PAID_POSTS.has(uri) ? 0 : 3;
+  // A bounded credit-history poll retries later through its original task.
+  const maxRetries = NON_RETRYABLE_PAID_POSTS.has(uri) || uri === "/commerce/v1/benefits/user_credit_history" ? 0 : 3;
   let lastError = null;
 
   while (retries <= maxRetries) {
@@ -186,12 +225,12 @@ export async function request(
       if (retries > 0) {
         logger.info(`第 ${retries} 次重试请求: ${method.toUpperCase()} ${fullUrl}`);
         // 重试前等待一段时间
-        await new Promise(resolve => setTimeout(resolve, 1000 * retries));
+        await delay(1000 * retries, undefined, { signal: signal as AbortSignal | undefined });
       }
 
       let response: AxiosResponse;
       if (usesSeedanceBrowser(method, uri, options.data)) {
-        response = await seedanceBrowser.request({ token, params: requestParams, headers, data: options.data, beforeSubmit: options.beforeSubmit, onSubmitting: options.onSubmitting });
+        response = await seedanceBrowser.request({ token, params: requestParams, headers, data: options.data, beforeSubmit: options.beforeSubmit, onSubmitting: options.onSubmitting, signal: signal as AbortSignal | undefined });
       } else {
         options.beforeSubmit?.();
         options.onSubmitting?.();
@@ -203,6 +242,7 @@ export async function request(
           timeout: 45000, // 增加超时时间到45秒
           validateStatus: () => true, // 允许任何状态码
           ..._.omit(options, "params", "headers", "beforeSubmit", "onSubmitting"),
+          ...(signal ? { signal } : {}),
         });
       }
 
@@ -224,10 +264,22 @@ export async function request(
         throw new Error(`HTTP ${response.status} ${response.statusText}`);
       }
 
-      return checkResult(response);
+      try { return checkResult(response); }
+      catch (error) {
+        const body = response.data, code = Number(body?.ret);
+        // Proof belongs to this received generate response, never to a code parsed from a transport error.
+        if (method.toLowerCase() === "post" && uri === "/mweb/v1/aigc_draft/generate" && error instanceof Error
+          && response.status >= 200 && response.status < 300 && body && typeof body === "object" && !Array.isArray(body)
+          && (typeof body.ret === "number" || typeof body.ret === "string" && /^-?\d+$/.test(body.ret)) && Number.isSafeInteger(code) && code !== 0 && typeof body.errmsg === "string" && body.errmsg.trim()) {
+          const message = body.errmsg.replace(/https?:\/\/\S+|jm_[A-Za-z0-9_-]+|(?:sessionid|sessionid_ss|sid_tt|cookie|authorization|token|api[_-]?key)\s*[=:]\s*\S+|Bearer\s+\S+/gi, "[已隐藏]").slice(0, 180);
+          videoSubmissionReceipts.set(error, { kind: "business-error", httpStatus: response.status, code, message, receivedAt: Date.now(), responseJsonHash: createHash("sha256").update(JSON.stringify(body)).digest("hex"), acceptanceIdentity: hasGenerationIdentity(body), ...(/^[a-fA-F0-9]{16,64}$/.test(String(body.logid || "")) ? { logId: String(body.logid) } : {}) });
+        }
+        throw error;
+      }
     }
     catch (error) {
       lastError = error;
+      if (signal?.aborted) break;
       const safeCode = typeof error?.code === "string" && /^[A-Z0-9_]{1,40}$/.test(error.code) ? error.code : "unknown";
       const status = Number(error?.response?.status);
       logger.error(`请求失败 (尝试 ${retries + 1}/${maxRetries + 1}) code=${safeCode} status=${Number.isInteger(status) ? status : "-"}`);
@@ -262,6 +314,7 @@ export async function checkFileUrl(fileUrl: string) {
   if (util.isBASE64Data(fileUrl)) return;
   const result = await axios.head(fileUrl, {
     timeout: 15000,
+    signal: videoRequestSignal(),
     validateStatus: () => true,
   });
   if (result.status >= 400)
@@ -293,6 +346,8 @@ export async function uploadFile(
   fileUrl: string,
   isVideoImage: boolean = false
 ): Promise<{ image_uri: string; uri: string }> {
+  const signal = videoRequestSignal();
+  signal?.throwIfAborted();
   // 只显示类型信息，不显示完整的base64内容
   const fileDesc = fileUrl.startsWith('data:')
     ? `base64图片(${fileUrl.length}字符)`
@@ -317,6 +372,7 @@ export async function uploadFile(
       responseType: "arraybuffer",
       maxContentLength: FILE_MAX_SIZE,
       timeout: 60000,
+      signal,
     });
     fileData = Buffer.from(response.data);
   } else {
@@ -350,6 +406,7 @@ export async function uploadFile(
       );
       if (uploadAuth?.access_key_id) break;
     } catch (error) {
+      signal?.throwIfAborted();
       lastUploadAuthError = error;
       logger.warn(`获取${isVideoImage ? "视频参考图" : "图片"}上传令牌失败，尝试兼容场景`);
     }
@@ -390,7 +447,7 @@ export async function uploadFile(
   // 获取图片上传凭证
   const uploadImgRes = await axios.get(
     'https://imagex.bytedanceapi.com/?' + new URLSearchParams(getUploadImageProofRequestParams as any).toString(),
-    { headers: requestHeadersInfo, timeout: 30000 }
+    { headers: requestHeadersInfo, timeout: 30000, signal }
   );
 
   if (uploadImgRes.data?.['Response ']?.hasOwnProperty('Error')) {
@@ -413,6 +470,7 @@ export async function uploadFile(
         'Content-Type': 'application/octet-stream',
       },
       timeout: 60000,
+      signal,
     }
   );
 
@@ -454,6 +512,7 @@ export async function uploadFile(
         'Content-Type': 'application/json',
       },
       timeout: 30000,
+      signal,
     }
   );
 

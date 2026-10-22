@@ -244,7 +244,7 @@ export async function generateImages(
         logger.error(`❌ [参考图] 第 ${index + 1} 张上传失败: ${error.message}`);
         throw new APIException(
           EX.API_REQUEST_FAILED,
-          `第 ${index + 1} 张参考图上传失败: ${error.message}`
+          `第 ${index + 1} 张参考图上传失败，未提交生成`
         );
       }
     }

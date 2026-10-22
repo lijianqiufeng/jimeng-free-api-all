@@ -4,8 +4,8 @@ import type { Browser, BrowserContext, Page } from "playwright-core";
 const ORIGIN = "https://jimeng.jianying.com";
 const GENERATE = "/mweb/v1/aigc_draft/generate";
 const MODELS = new Set(["dreamina_seedance_40_pro", "dreamina_seedance_40"]);
-type Input = { token: string; params: Record<string, unknown>; headers: Record<string, string>; data: any; beforeSubmit?: () => void; onSubmitting?: () => void };
-type Session = { context: BrowserContext; page: Page; body: string | null; sent: boolean };
+type Input = { token: string; params: Record<string, unknown>; headers: Record<string, string>; data: any; beforeSubmit?: () => void; onSubmitting?: () => void; signal?: AbortSignal };
+type Session = { context: BrowserContext; page: Page; body: string | null; sent: boolean; closing?: Promise<void> };
 
 export function usesSeedanceBrowser(method: string, uri: string, data: any) {
   return process.env.JIMENG_BROWSER_TRANSPORT === "on" && method.toLowerCase() === "post" && uri === GENERATE && MODELS.has(data?.extend?.root_model);
@@ -26,9 +26,17 @@ export class SeedanceBrowserTransport {
   constructor(private launch = launchBrowser) {}
 
   request(input: Input) {
-    const work = this.tail.then(() => this.execute(input));
+    input.signal?.throwIfAborted();
+    let started = false, abort: (() => void) | undefined;
+    const work = this.tail.then(() => { started = true; input.signal?.throwIfAborted(); return this.execute(input); });
     this.tail = work.catch(() => {});
-    return work;
+    if (!input.signal) return work;
+    const canceled = new Promise<never>((_resolve, reject) => {
+      abort = () => { if (!started) reject(input.signal!.reason || Error("视频请求已中断")); };
+      input.signal!.addEventListener("abort", abort, { once: true });
+      if (input.signal!.aborted) abort();
+    });
+    return Promise.race([work, canceled]).finally(() => input.signal!.removeEventListener("abort", abort!));
   }
 
   async close() {
@@ -39,19 +47,36 @@ export class SeedanceBrowserTransport {
     await browser?.close();
   }
 
-  private async prepare(token: string): Promise<Session> {
+  private closeSession(session: Session): Promise<void> {
+    return session.closing ||= (async () => {
+      let closed!: () => void;
+      const ended = new Promise<void>(resolve => { closed = resolve; });
+      session.context.once?.("close", closed);
+      try { await session.context.close(); }
+      catch {
+        // An unsuccessful close is not proof that this paid request has left the browser.
+        if (!session.page?.isClosed()) await ended;
+      } finally { session.context.off?.("close", closed); }
+    })();
+  }
+
+  private async prepare(token: string, signal?: AbortSignal): Promise<Session> {
+    signal?.throwIfAborted();
     const key = createHash("sha256").update(token).digest("hex");
     if (!this.browser?.isConnected()) { this.sessions.clear(); this.browser = await this.launch(); }
     const existing = this.sessions.get(key);
     if (existing && !existing.page.isClosed()) return existing;
-    if (existing) { await existing.context.close(); this.sessions.delete(key); }
+    if (existing) { await this.closeSession(existing); this.sessions.delete(key); }
     if (this.sessions.size >= 2) {
       const [oldKey, old] = this.sessions.entries().next().value!;
-      await old.context.close(); this.sessions.delete(oldKey);
+      await this.closeSession(old); this.sessions.delete(oldKey);
     }
     const context = await this.browser.newContext({ locale: "zh-CN", timezoneId: "Asia/Shanghai", serviceWorkers: "block" });
     const session: Session = { context, page: undefined!, body: null, sent: false };
+    const abort = () => { void this.closeSession(session); };
+    signal?.addEventListener("abort", abort, { once: true });
     try {
+      signal?.throwIfAborted();
       await context.addCookies(["sessionid", "sessionid_ss", "sid_tt"].map(name => ({ name, value: token, domain: ".jianying.com", path: "/", secure: true, httpOnly: true })));
       // The page itself must never create a job. Only our exact one-shot payload can pass.
       await context.route("**/*", async route => {
@@ -68,16 +93,21 @@ export class SeedanceBrowserTransport {
       if (new URL(session.page.url()).origin !== ORIGIN) throw Error("Unexpected page origin");
       this.sessions.set(key, session);
       return session;
-    } catch { await context.close(); throw Error("当前账号浏览器准备失败，未提交生成"); }
+    } catch { await this.closeSession(session); signal?.throwIfAborted(); throw Error("当前账号浏览器准备失败，未提交生成"); }
+    finally { signal?.removeEventListener("abort", abort); }
   }
 
   private async execute(input: Input) {
     clearTimeout(this.idle);
     let session: Session | undefined;
+    const abort = () => { if (session) void this.closeSession(session); };
     try {
+      input.signal?.throwIfAborted();
       if (!MODELS.has(input.data?.extend?.root_model) || typeof input.data?.submit_id !== "string" || !input.data.submit_id) throw Error("当前账号浏览器请求参数未确认，未提交生成");
       input.beforeSubmit?.();
-      session = await this.prepare(input.token);
+      session = await this.prepare(input.token, input.signal);
+      input.signal?.addEventListener("abort", abort, { once: true });
+      input.signal?.throwIfAborted();
       input.beforeSubmit?.();
       const url = new URL(GENERATE, ORIGIN);
       for (const [key, value] of Object.entries(input.params)) if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
@@ -97,10 +127,12 @@ export class SeedanceBrowserTransport {
     } catch (error) {
       if (session) {
         for (const [key, value] of this.sessions) if (value === session) this.sessions.delete(key);
-        await session.context.close().catch(() => {});
+        await this.closeSession(session);
       }
       throw error;
     } finally {
+      input.signal?.removeEventListener("abort", abort);
+      await session?.closing;
       if (session) session.body = null;
       this.idle = setTimeout(() => { void this.close().catch(() => {}); }, 5 * 60_000);
       this.idle.unref();

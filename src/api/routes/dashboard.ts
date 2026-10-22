@@ -2,6 +2,8 @@ import Request from '@/lib/request/Request.ts';
 import Response from '@/lib/response/Response.ts';
 import db from '@/lib/database.ts';
 import { getCredit } from '@/api/controllers/core.ts';
+import { videoQueueStatus } from '@/api/controllers/video-queue.ts';
+import { saveVideoQueueSettings } from '@/lib/video-queue-settings.ts';
 
 function sessionUser(request: Request): number | null {
   const sessionId = request.headers.cookie?.match(/(?:^|;\s*)session=([^;]+)/)?.[1];
@@ -21,6 +23,10 @@ export default {
   prefix: '/dashboard',
   get: {
     '/status': async () => ({ setupComplete: db.isSetupComplete() }),
+    '/video-queue': async (request: Request) => {
+      const error = authError(request); if (error) return error;
+      return videoQueueStatus();
+    },
     '/stats': async (request: Request) => {
       const error = authError(request); if (error) return error;
       return db.getStats();
@@ -42,6 +48,13 @@ export default {
     '/keys': async (request: Request) => {
       const error = authError(request); if (error) return error;
       return db.listApiKeys();
+    }
+  },
+  put: {
+    '/video-queue': async (request: Request) => {
+      const error = authError(request); if (error) return error;
+      try { saveVideoQueueSettings(request.body); return videoQueueStatus(); }
+      catch (error) { return new Response({ error: String(error.message), ...(error.code === 'VIDEO_QUEUE_CONFLICT' ? { code: error.code } : {}) }, { statusCode: error.code === 'VIDEO_QUEUE_CONFLICT' ? 409 : 400 }); }
     }
   },
   post: {

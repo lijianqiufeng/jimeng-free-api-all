@@ -350,6 +350,7 @@ export async function generateVideo(
   },
   refreshToken: string
 ) {
+  throw Error("同步视频生成已停止；请使用 /v1/tasks 持久视频队列，不自动降级或重提");
   const modelConfig = await resolveVideoModelConfig(_model, refreshToken);
   if (Object.hasOwn(SEEDANCE_MODELS, modelConfig.id)) throw Error("当前即梦视频模型须使用 /v1/tasks 持久化任务接口，不自动降级或重提");
   const model = modelConfig.modelReqKey || getModel(_model);
@@ -710,6 +711,7 @@ export async function generateVideoWithRetry(
   },
   refreshToken: string
 ): Promise<string> {
+  throw Error("同步视频生成已停止；请使用 /v1/tasks 持久视频队列，不自动降级或重提");
   // 降级策略: 先降分辨率，再降时长
   const modelConfig = await resolveVideoModelConfig(_model, refreshToken);
   if (Object.hasOwn(SEEDANCE_MODELS, modelConfig.id)) throw Error("当前即梦视频模型须使用 /v1/tasks 持久化任务接口，不自动降级或重提");

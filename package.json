@@ -16,6 +16,7 @@
     "dev": "tsup src/index.ts --format cjs,esm --sourcemap --dts --publicDir public --watch --onSuccess \"node --enable-source-maps --no-node-snapshot dist/index.js\"",
     "start": "node --enable-source-maps --no-node-snapshot dist/index.js",
     "build": "tsup src/index.ts --format cjs,esm --sourcemap --dts --clean --publicDir public",
+    "test:offline": "node tools/test-video-queue-isolated.mjs all",
     "test:account-selection": "esbuild tests/account-selection.test.ts --bundle --platform=node --format=esm --packages=external --outfile=.private/account-selection.test.mjs && node --test --test-force-exit .private/account-selection.test.mjs"
   },
   "author": "Vinlic",

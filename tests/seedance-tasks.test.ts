@@ -8,7 +8,7 @@ import models from "./fixtures/seedance-models.json";
 import standardModel from "./fixtures/seedance20-model.json";
 import { database, createApiKey, validateApiKey } from "@/lib/database.ts";
 import pool from "@/lib/account-pool.ts";
-import { createTask, queryTask, cancelTask } from "@/api/controllers/tasks.ts";
+import { createTask, queryTask, cancelTask, runVideoQueueTick } from "@/api/controllers/tasks.ts";
 import { taskInput, taskResult } from "@/api/controllers/task-contract.ts";
 import { resolveVideoModelConfig } from "@/api/controllers/models.ts";
 import { submitSeedanceVideo } from "@/api/controllers/seedance.ts";
@@ -16,7 +16,7 @@ import { seedanceInput } from "@/api/controllers/seedance-contract.ts";
 import { generateVideo, generateVideoWithRetry } from "@/api/controllers/videos.ts";
 import { checkResult } from "@/api/controllers/core.ts";
 
-let submits = 0, fail = "", draft: any, payload: any, historyStatus = 50, historyCookie = "", fetchFails = false, uploaded = 0, userReads = 0;
+let submits = 0, fail = "", draft: any, payload: any, historyStatus = 50, historyCookie = "", fetchFails = false, uploaded = 0, userReads = 0, referenceDuration = 3;
 const receipts = new Map<string, string>();
 test("risk diagnostics preserve only the explicit reason and safe upstream trace ID", () => {
   const response = (data: any) => ({ data, status: 200 }) as any;
@@ -24,13 +24,24 @@ test("risk diagnostics preserve only the explicit reason and safe upstream trace
   assert.throws(() => checkResult(response({ ret: "4013", errmsg: "risk rejected", fail_starling_key: "https://private.test/token", logid: "cookie=secret" })), (error: any) => error.upstreamCode === 4013 && !error.riskReason && !error.upstreamLogId);
 });
 const vodStages: string[] = [];
-childProcess.execFile = ((_file: string, _args: string[], _options: unknown, callback: Function) => callback(null, JSON.stringify({ format: { duration: 3 }, streams: [{ codec_type: "video", width: 1280, height: 720, avg_frame_rate: "24/1" }, { codec_type: "audio" }] }))) as any;
+childProcess.execFile = ((_file: string, _args: string[], _options: unknown, callback: Function) => {
+  callback(null, JSON.stringify({ format: { duration: referenceDuration }, streams: [{ codec_type: "video", width: 1280, height: 720, avg_frame_rate: "24/1" }, { codec_type: "audio" }] }));
+  const child = { once(event: string, handler: Function) { if (event === "close") queueMicrotask(() => handler(0)); return child; } };
+  return child;
+}) as any;
 globalThis.fetch = async url => {
   assert.match(String(url), /^https:\/\/fixture\.tos-cn-beijing\.volces\.com\//);
   if (fetchFails) throw Error("mock reference outage");
   return new Response(new Uint8Array(20), { headers: { "content-length": "20" } });
 };
 axios.defaults.adapter = async config => {
+  const path = new URL(String(config.url)).pathname;
+  if (path.endsWith("/benefit_metadata") || path.endsWith("/batch_get_user_benefit")) {
+    const types = JSON.parse(String(config.data)).query_list[0].benefit_type_list;
+    const data = path.endsWith("/benefit_metadata") ? { metadata_list: [{ resource_type: "aigc", resource_id: "generate_video", benefits_pay_strategy: types.map((benefit_type: string) => ({ benefit_type, unit: "second", credit_strategy: { credit_limits: [{ role: "all" }], credit_pricing_info: { min_charge_cnt: 1, credit_unit_price: String(config.headers?.Cookie).includes("fixture-poor") ? 8 : 6, original_credit_unit_price: 26 } } })) }] } : { asset_list: types.map((benefit_type: string) => ({ resource_type: "aigc", resource_id: "generate_video", benefit_type, asset_details: [{ pay_mode: "UserCredit", role: "all" }] })) };
+    return { data: { ret: "0", data }, status: 200, statusText: "OK", headers: {}, config };
+  }
+
   const url = String(config.url), ok = (data: unknown) => ({ data: { ret: "0", data }, status: 200, statusText: "OK", headers: {}, config });
   const raw = (data: unknown) => ({ ...ok(data), data });
   const parsed = new URL(url), action = parsed.searchParams.get("Action");
@@ -82,7 +93,7 @@ axios.defaults.adapter = async config => {
   throw Error(`unmocked network: ${new URL(url).pathname}`);
 };
 const key = createApiKey("isolated video"), owner = validateApiKey(key.key).apiKeyId!, auth = `Bearer ${key.key}`;
-pool.create({ name: "video_高级", sessionId: "fixed-video-account" });
+pool.create({ name: "13800005777_超级", sessionId: "fixed-video-account" });
 const base = { model: "jimeng-video-seedance-2.5", prompt: "蓝色小球滚动", ratio: "16:9", resolution: "720p", duration: 4, references: [] };
 const get = (id: string) => database.prepare("SELECT * FROM canvas_tasks WHERE id=?").get(id) as any;
 async function waitFor(id: string, status: string) {
@@ -110,6 +121,7 @@ test("five official models use dynamic resolutions, frame counts and ordinary co
     const id = `video_fixture_${model.replaceAll(".", "_")}`;
     const input = { ...base, model, id };
     const before = submits;
+    historyStatus = 20;
     await Promise.all([createTask(owner, auth, input), createTask(owner, auth, input)]);
     await waitFor(id, "running");
     assert.equal(submits, before + 1);
@@ -138,7 +150,7 @@ test("standard 2.0 uses the official reference-video commerce branch and rejects
   const model = "jimeng-video-seedance-2.0", image = "data:image/png;base64," + readFileSync("tests/fixtures/seedance-reference.png").toString("base64");
   const references = [{ kind: "image", url: image }, { kind: "image", url: image }, { kind: "video", url: "https://fixture.tos-cn-beijing.volces.com/a.mp4" }, { kind: "audio", url: "https://fixture.tos-cn-beijing.volces.com/a.mp3" }];
   const before = submits, previousUploads = uploaded;
-  await submitSeedanceVideo(seedanceInput({ ...base, model, references }), "fixed-video-account", { beforeSubmit() {}, onSubmitted() {} });
+  await submitSeedanceVideo(seedanceInput({ ...base, model, references }), "fixed-video-account", { beforeSubmit() {}, onQuoted() {}, onSubmitted() {} });
   assert.equal(submits, before + 1);
   assert.equal(payload.extend.m_video_commerce_info.benefit_type, "dreamina_video_seedance_20_video_add");
   assert.deepEqual(payload.extend.m_video_commerce_info_list, [payload.extend.m_video_commerce_info]);
@@ -153,13 +165,21 @@ test("standard 2.0 uses the official reference-video commerce branch and rejects
   const commercial = standardModel.commercial_config;
   try {
     standardModel.commercial_config = {} as any;
-    await assert.rejects(submitSeedanceVideo(seedanceInput({ ...base, model }), "new-no-commerce-fixture", { beforeSubmit() {}, onSubmitting() { assert.fail(); }, onSubmitted() { assert.fail(); } }), /计费项未确认/);
+    await assert.rejects(submitSeedanceVideo(seedanceInput({ ...base, model }), "new-no-commerce-fixture", { beforeSubmit() {}, onQuoted() {}, onSubmitting() { assert.fail(); }, onSubmitted() { assert.fail(); } }), /计费项未确认/);
   } finally { standardModel.commercial_config = commercial; }
   assert.equal(submits, before + 1);
 });
 test("unsupported parameters and internal URLs fail before any paid request", () => {
   for (const change of [{ duration: -1 }, { n: 2 }, { resolution: "4k" }, { ratio: "adaptive" }, { model: "jimeng-video-seedance-2.0-mini", duration: 30 }, { references: [{ kind: "video", url: "http://127.0.0.1/private" }] }]) assert.throws(() => taskInput({ ...base, id: "video_invalid_12345", ...change }));
   assert.equal(taskResult({ a: { status: 40 } }, "a", "video").status, "failed");
+});
+test("legacy video and chat aliases cannot bypass the durable queue", async () => {
+  const before = submits;
+  for (const model of ["jimeng-video-seedance-1.5-pro", "jimeng-video-3.0", "seedance-1.0"]) {
+    await assert.rejects(generateVideo(model, "fixture", {}, "fixed-video-account"), /\/v1\/tasks/);
+    await assert.rejects(generateVideoWithRetry(model, "fixture", {}, "fixed-video-account"), /\/v1\/tasks/);
+  }
+  assert.equal(submits, before);
 });
 test("all multimodal references must upload, preserving material order", async () => {
   const image = `data:image/png;base64,${readFileSync("tests/fixtures/seedance-reference.png").toString("base64")}`;
@@ -168,7 +188,7 @@ test("all multimodal references must upload, preserving material order", async (
   vodStages.length = 0;
   const previousReads = userReads, previousUploads = uploaded;
   let submitting = 0;
-  await submitSeedanceVideo(seedanceInput({ ...base, references }), "fixed-video-account", { beforeSubmit() {}, onSubmitting() { submitting++; assert.equal(vodStages.at(-1), "CommitUploadInner"); }, onSubmitted(id) { submitted = id; } });
+  await submitSeedanceVideo(seedanceInput({ ...base, references }), "fixed-video-account", { beforeSubmit() {}, onQuoted() {}, onSubmitting() { submitting++; assert.equal(vodStages.at(-1), "CommitUploadInner"); }, onSubmitted(id) { submitted = id; } });
   assert.ok(submitted);
   assert.equal(submitting, 1);
   assert.equal(userReads, previousReads + 1, "全部参考音视频复用一次真实账号 UID 查询");
@@ -179,14 +199,20 @@ test("all multimodal references must upload, preserving material order", async (
   assert.deepEqual(unified.material_list.slice(0, 2).map((x: any) => [x.image_info.image_uri, x.image_info.width, x.image_info.height]), [[`frame-${previousUploads + 1}`, 512, 512], [`frame-${previousUploads + 2}`, 512, 512]]);
   assert.equal(payload.extend.m_video_commerce_info.benefit_type, "seedance_25_720p_output");
   const before = submits; fetchFails = true;
-  await assert.rejects(submitSeedanceVideo(seedanceInput({ ...base, references }), "fixed-video-account", { beforeSubmit() {}, onSubmitting() { assert.fail(); }, onSubmitted() { assert.fail(); } }), /参考视频读取失败，未提交生成/);
+  await assert.rejects(submitSeedanceVideo(seedanceInput({ ...base, references }), "fixed-video-account", { beforeSubmit() {}, onQuoted() {}, onSubmitting() { assert.fail(); }, onSubmitted() { assert.fail(); } }), /参考视频 1：读取失败，未提交生成/);
   fetchFails = false; assert.equal(submits, before);
 });
-test("two simultaneous VIP tasks keep independent receipts and terminal results", async () => {
+test("two simultaneous VIP inputs queue on one account and keep independent receipts and results", async () => {
   const before = submits;
   const inputs = [1, 2].map(index => ({ ...base, model: "jimeng-video-seedance-2.0-vip", id: `video_concurrent_${index}_1234567890`, prompt: `并行脚本${index}` }));
   await Promise.all(inputs.map(input => createTask(owner, auth, input)));
-  await Promise.all(inputs.map(input => waitFor(input.id, "running")));
+  for (const input of inputs) {
+    await runVideoQueueTick();
+    const deadline = Date.now() + 3000;
+    while (!get(input.id).history_id && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.ok(get(input.id).history_id);
+    assert.equal((await queryTask(owner, input.id)).body.status, "succeeded");
+  }
   assert.equal(submits, before + 2);
   assert.equal(new Set(inputs.map(input => get(input.id).history_id)).size, 2);
   for (const input of inputs) assert.equal(get(input.id).history_id, receipts.get(input.prompt));
@@ -196,14 +222,27 @@ test("two simultaneous VIP tasks keep independent receipts and terminal results"
   assert.equal(submits, before + 2);
 });
 
+test("short-video preparation errors survive the durable queue without a paid submission or account hold", async () => {
+  const id = "video_short_1234567890", before = submits;
+  referenceDuration = 1.5;
+  try {
+    await createTask(owner, auth, { ...base, id, references: [{ kind: "video", url: "https://fixture.tos-cn-beijing.volces.com/short.mp4" }] });
+    await runVideoQueueTick(); await waitFor(id, "failed");
+    assert.match((await queryTask(owner, id)).body.error, /参考视频 1：时长 1.5 秒，不足即梦要求的 2 秒.*未提交生成/);
+    assert.equal(submits, before); assert.equal(get(id).provider_hold, 0); assert.equal(get(id).paid_started_at, 0);
+  } finally { referenceDuration = 3; }
+});
+
 test("cancel before POST cannot dispatch; insufficient credit, ambiguous errors and 4013 never retry", async () => {
   const canceled = "video_cancel_1234567890", before = submits;
   cancelTask(owner, canceled);
   assert.equal((await createTask(owner, auth, { ...base, id: canceled })).status, 409);
   assert.equal(submits, before);
-  for (const failure of ["1006", "numeric1006", "5000", "timeout", "4013"]) {
+  for (const failure of ["1006", "numeric1006", "5000", "4013", "timeout"]) {
     fail = failure; const id = `video_failure_${failure}_1234567890`, input = { ...base, id };
-    await createTask(owner, auth, input); await waitFor(id, "failed");
+    database.prepare("UPDATE jimeng_accounts SET cooldown_until=NULL").run();
+    await createTask(owner, auth, input); await runVideoQueueTick(); await waitFor(id, failure === "timeout" ? "uncertain" : "failed");
+    assert.equal(Boolean(get(id).provider_hold), failure === "timeout");
     const count = submits;
     await createTask(owner, auth, input); await queryTask(owner, id);
     assert.equal(submits, count);

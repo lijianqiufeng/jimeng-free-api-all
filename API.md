@@ -4,15 +4,18 @@
 
 ---
 
-## 画布四视频模型异步任务（未部署）
+## 持久视频任务（当前开发分支，未部署）
 
-当前仅本地实现与离线测试通过；用户取消真实生成和本轮部署。下列能力不能据此标为实际出片验证通过。
+当前仅本地实现、构建与离线测试通过；没有进行本轮真实付费生成或部署。下列能力不能据此标为实际出片验证通过。
 
 使用管理端 `jm_` API Key 调用 `POST /v1/tasks`、`GET /v1/tasks/:id`、`DELETE /v1/tasks/:id`。任务 ID 须在首次 POST 前保存；相同 ID 与参数返回原任务，不重复生成，不同归属或参数冲突返回 409。账号池凭据和上游历史 ID 由服务端保存，不返回客户端。
 
 | model | resolution | duration | 图片 / 视频 / 音频 / 合计 |
 | --- | --- | --- | --- |
+| `jimeng-video-seedance-2.0` | 720p | 4–15 秒 | 9 / 3 / 3 / 12 |
 | `jimeng-video-seedance-2.5` | 480p / 720p / 1080p | 4–30 秒 | 30 / 10 / 10 / 50 |
+| `jimeng-video-seedance-2.5-draft` | 480p | 4–30 秒 | 30 / 10 / 10 / 50 |
+| `jimeng-video-seedance-2.5-long` | 720p | 30–180 秒，实际范围按账号动态配置 | 30 / 10 / 10 / 50 |
 | `jimeng-video-seedance-2.0-mini` | 720p | 4–15 秒 | 9 / 3 / 3 / 12 |
 | `jimeng-video-seedance-2.0-fast-vip` | 720p | 4–15 秒 | 9 / 3 / 3 / 12 |
 | `jimeng-video-seedance-2.0-vip` | 720p / 1080p / 4k | 4–15 秒 | 9 / 3 / 3 / 12 |
@@ -31,9 +34,16 @@
 
 每项参考为 `{ "kind": "image|video|audio", "url": "…" }`，列表顺序就是素材编号。图片仅 PNG/JPEG/WebP data URL，单张 25MB、合计 40MB；音视频仅团队 TOS 公网 HTTPS 签名 URL，禁止内网、文件路径和重定向。音频单个 15MB，视频单个 2.5 为 200MB、其他为 50MB；上传后还核对时长、尺寸与帧率，任一失败均不提交生成。2.0 系列音频参考须同时提供图片或视频。
 
-比例固定为 16:9、9:16、1:1、4:3、3:4、21:9，每任务一个视频；不支持样片、长视频、视频编辑或自动时长。创建前必须读到账号动态模型配置和当前权益，失败不静默降级。四型号及别名不走旧 `/v1/videos/generations` / 聊天生成路径。
+比例固定为 16:9、9:16、1:1、4:3、3:4、21:9，每任务一个视频。样片转高清使用独立的 `operation: "generate-from-draft"` 与原样片任务 ID；长视频仅接受动态配置确认的 720p 时长。创建前必须读到账号动态模型配置、当前权益和官方报价，失败不静默降级。所有视频型号及别名都不走旧 `/v1/videos/generations` 或聊天生成路径。
 
-状态为 running / succeeded / failed / canceled，成功 `data` 仅含本任务视频 URL。默认等待 30 分钟，已经取得历史 ID 的视频仍可继续查询原任务；断线或重启不得 POST 新任务代替恢复。删除仅停止等待，不能保证撤销上游或退积分。当前无精确逐单积分字段，不将账号余额差或零配置价格伪装为实际消费。
+状态为 queued / running / succeeded / failed / canceled / uncertain，成功 `data` 仅含本任务视频 URL。默认排队与提交期限为 30 分钟，已经取得历史 ID 的视频仍继续查询原任务；断线或重启不得 POST 新任务代替恢复。删除仅停止等待，不能保证撤销上游或退积分。任务成功后按原提交身份查询唯一 `Checked` 账单；账单未确认时返回 `billingPending` 并继续保留资金预留。
+
+新视频只使用名称以 `_超级` 结尾且实时余额、能力满足要求的账号。调用前可读取：
+
+- `GET /v1/videos/policy`：校验账号、队列和长视频合同版本。
+- `GET /v1/videos/quote`：读取官方积分估算，不占生成槽、不预扣积分。
+
+完整队列、核账、强制中断和长视频边界见 [项目状态](docs/PROJECT-STATUS.md)、[视频队列](docs/VIDEO-QUEUE.md) 与 [长视频](docs/LONG-VIDEO.md)。
 
 ---
 
@@ -46,7 +56,7 @@
 - [5. 接口详解](#5-接口详解)
   - [5.1 健康检查 `GET /ping`](#51-健康检查-get-ping)
   - [5.2 图像生成 `POST /v1/images/generations`](#52-图像生成-post-v1imagesgenerations)
-  - [5.3 视频生成 `POST /v1/videos/generations`](#53-视频生成-post-v1videosgenerations)
+  - [5.3 持久视频任务 `/v1/tasks`](#53-持久视频任务-v1tasks)
   - [5.4 对话补全 `POST /v1/chat/completions`](#54-对话补全-post-v1chatcompletions)
   - [5.5 模型列表 `GET /v1/models`](#55-模型列表-get-v1models)
   - [5.6 账号状态 `GET /v1/account/status`](#56-账号状态-get-v1accountstatus)
@@ -67,7 +77,7 @@
 | 内容 | 地址 |
 |---|---|
 | API 服务 | `http://localhost:8000` |
-| 管理控制台 | `http://localhost:8000/dashboard` |
+| 管理控制台 | `http://localhost:8000/` |
 
 ---
 
@@ -146,7 +156,13 @@ curl http://localhost:8000/ping
 |---|---|---|---|
 | GET | `/ping` | 健康检查 | 无 |
 | POST | `/v1/images/generations` | 图像生成（支持参考图） | 必填 |
-| POST | `/v1/videos/generations` | 视频生成（支持首尾帧） | 必填 |
+| POST | `/v1/videos/generations` | 已停止；返回 400 并引导使用持久任务 | 必填 |
+| GET | `/v1/videos/policy` | 视频账号、队列和长视频合同版本 | 必填（仅 `jm_` Key） |
+| GET | `/v1/videos/quote` | 只读官方积分估算 | 必填（仅 `jm_` Key） |
+| POST | `/v1/tasks` | 创建持久图片或视频任务 | 必填（仅 `jm_` Key） |
+| GET | `/v1/tasks/:id` | 查询原持久任务 | 必填（仅 `jm_` Key） |
+| DELETE | `/v1/tasks/:id` | 停止等待；不保证撤销上游 | 必填（仅 `jm_` Key） |
+| GET/POST | `/v1/tasks/:id/interrupt` | 读取或执行视频强制中断/人工核对 | 必填（仅 `jm_` Key） |
 | POST | `/v1/chat/completions` | OpenAI 兼容对话补全 | 必填 |
 | GET | `/v1/models` | 模型列表 | 可选（有则实时拉取官网） |
 | GET | `/v1/account/status` | 账号积分/会员状态 | 必填 |
@@ -156,7 +172,8 @@ curl http://localhost:8000/ping
 | GET | `/v1/upscale/tasks/:id` | Agent 智能高清（查询任务） | 必填（仅 `jm_` Key） |
 | DELETE | `/v1/upscale/tasks/:id` | Agent 智能高清（停止等待） | 必填（仅 `jm_` Key） |
 | GET | `/account-pool/*` | 账号池管理（管理端） | 登录 |
-| GET | `/dashboard` | 管理控制台 | 登录 |
+| GET | `/` | 管理控制台页面 | 页面登录 |
+| GET/PUT | `/dashboard/video-queue` | 视频队列状态与并发设置 | 登录 |
 
 ---
 
@@ -236,60 +253,65 @@ curl -X POST http://localhost:8000/v1/images/generations \
 
 ---
 
-### 5.3 视频生成 `POST /v1/videos/generations`
+### 5.3 持久视频任务 `/v1/tasks`
 
-#### 请求体（JSON）
+旧同步入口 `POST /v1/videos/generations` 已停止并返回 400。视频必须使用管理端
+`jm_` Key 创建持久任务；调用方应在发出 POST 前生成并保存任务 ID。
 
-| 参数 | 类型 | 必填 | 默认值 | 说明 |
-|---|---|---|---|---|
-| `model` | string | 否 | `jimeng-video-seedance-2.0` | 视频模型 ID |
-| `prompt` | string | 是 | - | 提示词 |
-| `ratio` | string | 否 | 模型默认 | `16:9` `9:16` `1:1` `4:3` `3:4` `21:9` |
-| `resolution` | string | 否 | `720p` | `720p` `1080p` `4k`（按模型支持） |
-| `duration` | integer | 否 | 模型默认 | 时长秒数；Seedance 2.0 系列默认 5 秒，支持 4~15 秒；其他模型通常支持 5 或 10 秒 |
-| `file_paths` | string[] | 否 | `[]` | 首尾帧参考图：本地路径 / URL / base64 |
-| `response_format` | string | 否 | `url` | `url` 或 `b64_json` |
-
-同样支持 `multipart/form-data` 上传首尾帧图片。
-
-#### 请求示例
+#### 创建任务
 
 ```bash
-curl -X POST http://localhost:8000/v1/videos/generations \
+curl -X POST http://localhost:8000/v1/tasks \
   -H "Authorization: Bearer jm_xxx" \
   -H "Content-Type: application/json" \
   -d '{
+    "id": "canvas_video_example_0001",
     "model": "jimeng-video-seedance-2.0",
     "prompt": "女孩在沙滩奔跑，夕阳逆光",
+    "ratio": "16:9",
+    "resolution": "720p",
     "duration": 10
   }'
 ```
 
-#### 响应
+相同 ID、归属和参数再次 POST 时返回原任务；ID 已被其他归属或参数占用时返回 409。视频参考素材统一放在有序 `references` 中。
+
+#### 查询与停止等待
+
+```bash
+curl -H "Authorization: Bearer jm_xxx" \
+  http://localhost:8000/v1/tasks/canvas_video_example_0001
+
+curl -X DELETE -H "Authorization: Bearer jm_xxx" \
+  http://localhost:8000/v1/tasks/canvas_video_example_0001
+```
+
+查询可能返回 `queued`、`running`、`succeeded`、`failed`、`canceled` 或 `uncertain`。`uncertain` 表示付费提交回执无法确认；服务保留原账号与预留，不自动重提。成功但账单未确认时带有 `billingPending: true`。
+
+#### 合同与报价
 
 ```json
 {
-  "created": 1787794197,
-  "data": [
-    {
-      "url": "https://v3-web.douyinvod.com/...",
-      "revised_prompt": "女孩在沙滩奔跑，夕阳逆光"
-    }
-  ]
+  "accountPolicy": "super-only",
+  "videoQueuePolicy": "serial-submit-on-accepted-v2",
+  "longVideoPolicy": "official-long-video-v1"
 }
 ```
+
+上述对象由 `GET /v1/videos/policy` 返回。`GET /v1/videos/quote` 接受
+`model`、`resolution`、`duration`、`hasVideo` 和 `referenceVideoSeconds` 查询参数，返回当前超级账号池的官方积分估算；它不会创建任务或占用队列。
 
 ---
 
 ### 5.4 对话补全 `POST /v1/chat/completions`
 
-OpenAI Chat Completions 兼容。根据模型自动路由到图像或视频生成，支持多模态（带图）。
+OpenAI Chat Completions 兼容，支持图像模型与多模态参考图。视频模型必须使用 `/v1/tasks`。
 
 #### 请求体
 
 | 参数 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `model` | string | 否 | 图像模型（默认 `jimeng-image-5.0-lite`）或 `jimeng-video-*` 模型 |
+| `model` | string | 否 | 图像模型，默认 `jimeng-image-5.0-lite` |
 | `messages` | array | 是 | OpenAI 消息格式，最后一条的文本作为 prompt |
 | `stream` | bool | 否 | 是否流式返回（SSE） |
 
@@ -319,17 +341,6 @@ OpenAI Chat Completions 兼容。根据模型自动路由到图像或视频生�
         { "type": "image_url", "image_url": { "url": "https://example.com/img.jpg" } }
       ]
     }
-  ]
-}
-```
-
-#### 视频示例
-
-```json
-{
-  "model": "jimeng-video-seedance-2.0",
-  "messages": [
-    { "role": "user", "content": "一只奔跑的柴犬，5秒" }
   ]
 }
 ```

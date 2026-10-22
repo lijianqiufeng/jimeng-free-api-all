@@ -10,10 +10,10 @@ import axios from "axios";
 import aws4 from "aws4";
 import CRC32 from "crc-32";
 import mime from "mime";
-import { request } from "./core.ts";
+import { request, videoRequestSignal } from "./core.ts";
 
 type Reference = { kind: "video" | "audio"; url: string };
-class UploadError extends Error {
+export class UploadError extends Error {
   code: string;
   constructor(kind: Reference["kind"], public phase: string, reason: string, code = "REFERENCE_UPLOAD_FAILED") {
     super(`参考${kind === "video" ? "视频" : "音频"}${reason}，未提交生成`);
@@ -42,7 +42,8 @@ export async function uploadSeedanceReference(token: string, ref: Reference, max
   const fail = (reason: string, code?: string) => new UploadError(ref.kind, phase, reason, code);
   try {
     beforeSubmit();
-    const signal = AbortSignal.timeout(120_000);
+    const taskSignal = videoRequestSignal();
+    const signal = taskSignal ? AbortSignal.any([taskSignal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000);
     const response = await fetch(ref.url, { redirect: "error", signal });
     const maxBytes = (ref.kind === "audio" ? 15 : maxSeconds === 30 ? 200 : 50) * 1024 * 1024;
     const size = Number(response.headers.get("content-length"));
@@ -58,10 +59,17 @@ export async function uploadSeedanceReference(token: string, ref: Reference, max
     await pipeline(Readable.fromWeb(response.body as any), limiter, createWriteStream(file, { mode: 0o600 }), { signal });
     if (received !== size) throw fail("读取不完整", "REFERENCE_SIZE_INVALID");
     phase = "probe"; beforeSubmit();
-    const text = await new Promise<string>((resolve, reject) => childProcess.execFile("ffprobe", ["-v", "error", "-protocol_whitelist", "file,pipe", "-format_whitelist", "mov,matroska,webm,avi,mp3,wav,ogg,flac,aac", "-show_entries", "stream=codec_type,width,height,avg_frame_rate:format=duration", "-of", "json", file], { timeout: 30_000, maxBuffer: 128 * 1024 }, (error, stdout) => error ? reject(error) : resolve(stdout)));
+    const text = await new Promise<string>((resolve, reject) => {
+      let outcome: { error: Error | null; stdout: string } | undefined, closed = false;
+      const finish = () => { if (closed && outcome) outcome.error ? reject(outcome.error) : resolve(outcome.stdout); };
+      const child = childProcess.execFile("ffprobe", ["-v", "error", "-protocol_whitelist", "file,pipe", "-format_whitelist", "mov,matroska,webm,avi,mp3,wav,ogg,flac,aac", "-show_entries", "stream=codec_type,width,height,avg_frame_rate:format=duration", "-of", "json", file], { timeout: 30_000, maxBuffer: 128 * 1024, signal }, (error, stdout) => { outcome = { error, stdout }; finish(); });
+      child.once("close", () => { closed = true; finish(); });
+    });
     const info = JSON.parse(text), seconds = Number(info.format?.duration);
     const stream = info.streams?.find((item: any) => item.codec_type === ref.kind);
-    if (!stream || !Number.isFinite(seconds) || seconds < 2 || seconds > maxSeconds + (ref.kind === "video" ? 0.2 : 0)) throw fail("时长不符合模型限制", "REFERENCE_DURATION_INVALID");
+    if (!stream || !Number.isFinite(seconds) || seconds <= 0) throw fail("无法读取有效时长，请重新导出素材", "REFERENCE_DURATION_INVALID");
+    if (seconds < 2) throw fail(`时长 ${Math.floor(seconds * 1000) / 1000} 秒，不足即梦要求的 2 秒；请使用至少 2 秒的素材`, "REFERENCE_DURATION_INVALID");
+    if (seconds > maxSeconds + (ref.kind === "video" ? 0.2 : 0)) throw fail(`时长 ${Math.floor(seconds * 1000) / 1000} 秒，超过当前模型 ${maxSeconds} 秒上限；请先裁剪素材`, "REFERENCE_DURATION_INVALID");
     const width = Number(stream.width), height = Number(stream.height), rate = String(stream.avg_frame_rate || "").split("/"), fps = Number(rate[0]) / Number(rate[1]);
     if (ref.kind === "video") {
       const min = maxSeconds === 30 ? 300 : 200, max = maxSeconds === 30 ? 6000 : 2160;
@@ -72,7 +80,7 @@ export async function uploadSeedanceReference(token: string, ref: Reference, max
     if (!auth.access_key_id || !auth.secret_access_key || !auth.session_token || !auth.space_name) throw fail("上传凭据不完整", "REFERENCE_TOKEN_INVALID");
     const send = async (method: "GET" | "POST", url: string, headers: Record<string, string>, data?: unknown) => {
       beforeSubmit();
-      const result = await axios.request({ method, url, headers, data, timeout: 30_000, maxRedirects: 0, maxContentLength: 128 * 1024, maxBodyLength: 6 * 1024 * 1024 });
+      const result = await axios.request({ method, url, headers, data, timeout: 30_000, signal, maxRedirects: 0, maxContentLength: 128 * 1024, maxBodyLength: 6 * 1024 * 1024 });
       if (result.data?.ResponseMetadata?.Error) throw Object.assign(Error("VOD rejected"), { code: result.data.ResponseMetadata.Error.Code });
       return result.data;
     };

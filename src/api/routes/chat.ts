@@ -20,6 +20,7 @@ export default {
             // refresh_token切分
             // 随机挑选一个refresh_token
             const video = Boolean(request.body.model?.startsWith('jimeng-video'));
+            if (video) return new Response({ error: '聊天视频生成已停止；请使用 /v1/tasks 持久视频队列，不自动降级或重提' }, { statusCode: 400 });
             const credential = await resolveAuthorization(request.headers.authorization, undefined, request.body.model || DEFAULT_MODEL, video, video);
             const token = credential.token;
             const { model, messages, stream } = request.body;

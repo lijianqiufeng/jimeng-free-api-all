@@ -18,7 +18,7 @@ async function handle(request: Request, create: boolean) {
   const id = String(request.params.id);
   const result = request.method.toUpperCase() === "DELETE"
     ? cancelUpscaleTask(auth.apiKeyId, id)
-    : await queryUpscaleTask(auth.apiKeyId, id);
+    : await queryUpscaleTask(auth.apiKeyId, id, String(request.query?.refresh || "") === "1", request.headers["x-jimeng-account-id"]);
   return new Response(result.body, { statusCode: result.status });
 }
 

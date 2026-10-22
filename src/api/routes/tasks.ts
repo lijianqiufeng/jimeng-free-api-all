@@ -1,13 +1,19 @@
 import Request from "@/lib/request/Request.ts";
 import Response from "@/lib/response/Response.ts";
 import { validateApiKey } from "@/lib/database.ts";
-import { createTask, queryTask, cancelTask } from "@/api/controllers/tasks.ts";
+import { createTask, queryTask, cancelTask, readTaskInterruption, interruptTask } from "@/api/controllers/tasks.ts";
 import { publicAccountError } from "@/api/controllers/auth.ts";
 
-async function handle(request: Request, create: boolean) {
+async function handle(request: Request, create: boolean, interrupt = false) {
   const key = /^Bearer (jm_[A-Za-z0-9_-]+)$/.exec(request.headers.authorization || "")?.[1];
   const auth = key ? validateApiKey(key) : undefined;
   if (!auth?.valid || !auth.apiKeyId) return new Response({ error: "API Key 无效" }, { statusCode: 401 });
+  if (interrupt) {
+    try {
+      const result = request.method.toUpperCase() === "GET" ? readTaskInterruption(auth.apiKeyId, String(request.params.id)) : await interruptTask(auth.apiKeyId, String(request.params.id), request.body ?? {});
+      return new Response(result.body, { statusCode: result.status });
+    } catch { return new Response({ error: "原任务中断状态暂时不可用，原绑定与积分预留保留，请稍后读取最新状态" }, { statusCode: 503 }); }
+  }
   if (create) {
     try {
       const result = await createTask(auth.apiKeyId, request.headers.authorization, request.body, request.headers["x-jimeng-account-id"]);
@@ -20,4 +26,4 @@ async function handle(request: Request, create: boolean) {
   return new Response(result.body, { statusCode: result.status });
 }
 
-export default { prefix: "/v1/tasks", post: { "": async (request: Request) => handle(request, true) }, get: { "/:id": async (request: Request) => handle(request, false) }, delete: { "/:id": async (request: Request) => handle(request, false) } };
+export default { prefix: "/v1/tasks", post: { "": async (request: Request) => handle(request, true), "/:id/interrupt": async (request: Request) => handle(request, false, true) }, get: { "/:id": async (request: Request) => handle(request, false), "/:id/interrupt": async (request: Request) => handle(request, false, true) }, delete: { "/:id": async (request: Request) => handle(request, false) } };
