@@ -15,7 +15,8 @@ const blocked = () => { throw Error("Unmocked network is forbidden"); };
 http.request = https.request = http.get = https.get = net.connect = net.createConnection = blocked as any;
 globalThis.fetch = blocked as any;
 const submits: Array<{ prompt: string; token: string; history: string }> = [], modes = new Map<string, string>(), histories = new Map<string, number>();
-const credits = new Map<string, number>();
+const credits = new Map<string, number>(), resultUrls = new Map<string, string>();
+let creditReads = 0, billingReads = 0;
 let billingStatus = "Checked";
 let delayedHistory = "", releaseHistory: (() => void) | undefined, historyReadStarted = false;
 axios.defaults.adapter = async config => {
@@ -29,10 +30,10 @@ axios.defaults.adapter = async config => {
   const pathname = new URL(String(config.url)).pathname;
   const token = String(config.headers?.Cookie || "");
   const ok = (data: unknown) => ({ data: { ret: "0", data }, status: 200, statusText: "OK", headers: {}, config });
-  if (pathname.endsWith("/user_credit")) return ok({ credit: { gift_credit: credits.get(/(?:^|; )sessionid=([^;]+)/.exec(token)?.[1] || "") ?? (token.includes("fixture-rich") ? 100 : 50), purchase_credit: 0, vip_credit: 0 } });
+  if (pathname.endsWith("/user_credit")) { creditReads++; return ok({ credit: { gift_credit: credits.get(/(?:^|; )sessionid=([^;]+)/.exec(token)?.[1] || "") ?? (token.includes("fixture-rich") ? 100 : 50), purchase_credit: 0, vip_credit: 0 } }); }
   if (pathname.endsWith("/video_generate/get_common_config")) return ok({ models });
   if (pathname.endsWith("/get_common_config")) return ok({});
-  if (pathname.endsWith("/user_credit_history")) return ok({ records: submits.filter(item => histories.get(item.history) === 50).map(item => ({ submit_id: item.history, history_id: `bill-${item.history}`, history_type: 2, status: billingStatus, amount: 32, origin_credit_amount: 64 })), has_more: false });
+  if (pathname.endsWith("/user_credit_history")) { billingReads++; return ok({ records: submits.filter(item => histories.get(item.history) === 50).map(item => ({ submit_id: item.history, history_id: `bill-${item.history}`, history_type: 2, status: billingStatus, amount: 32, origin_credit_amount: 64 })), has_more: false }); }
   if (pathname.endsWith("/aigc_draft/generate")) {
     const payload = JSON.parse(String(config.data)), draft = JSON.parse(payload.draft_content);
     const prompt = draft.component_list[0].abilities.gen_video.text_to_video_params.video_gen_inputs[0].prompt;
@@ -48,7 +49,7 @@ axios.defaults.adapter = async config => {
     const history = JSON.parse(String(config.data)).history_ids[0], original = submits.find(item => item.history === history);
     if (history === delayedHistory) { historyReadStarted = true; await new Promise<void>(resolve => { releaseHistory = resolve; }); }
     assert.equal(/(?:^|; )sessionid=([^;]+)/.exec(token)?.[1], /(?:^|; )sessionid=([^;]+)/.exec(original?.token || "")?.[1], "recovery only queries the original account/history; sid_guard timestamps may change");
-    return ok({ [history]: { status: histories.get(history), submit_id: history, item_list: [{ video: { transcoded_video: { origin: { video_url: "https://result.test/fixture.mp4" } } } }] } });
+    return ok({ [history]: { status: histories.get(history), submit_id: history, item_list: [{ video: { origin_video: { video_url: resultUrls.get(history) || "https://result.test/original.mp4" }, transcoded_video: { origin: { video_url: "https://result.test/compressed.mp4" } } } }] } });
   }
   throw Error(`Unmocked request: ${pathname}`);
 };
@@ -124,6 +125,9 @@ if (restarting) {
     assert.equal(JSON.parse(row(first).quote_json).accountTier, "super", "later renaming cannot change the original paid account tier");
     assert.equal(JSON.parse(row(first).quote_json).estimatedCredits, 32);
     assert.equal(JSON.parse(row(first).quote_json).taskId, first);
+    const publicQuote = (await queryTask(owner, first)).body.quote;
+    assert.match(publicQuote.submitId, /^[A-Za-z0-9_-]+$/, "the main API receives the frozen submit identity needed by long-video settlement");
+    assert.equal(publicQuote.draftId, undefined); assert.equal(publicQuote.accountName, undefined); assert.equal(publicQuote.accountTier, undefined);
     assert.equal(row(first).account_id, poor, "four unknown legacy rows hold only their original account");
     const queued = "queue_legacy_waiting_fixture";
     assert.equal((await createTask(owner2, auth2, input(queued))).body.status, "queued");
@@ -215,6 +219,25 @@ if (restarting) {
     await complete(b);
     await complete(c);
     await complete(fourth); pool.setAccountEnabled(third, false);
+
+    const refreshTask = row(a), refreshedUrl = "https://result.test/original-refreshed.mp4";
+    const refreshIdentity = { account_id: refreshTask.account_id, history_id: refreshTask.history_id, credential: refreshTask.credential }, beforeRefreshCredits = creditReads, beforeRefreshBilling = billingReads, beforeRefreshSubmits = submits.length;
+    assert.equal(refreshIdentity.credential, "", "settled tasks refresh through the saved account identity without retaining a task credential");
+    pool.setAccountEnabled(refreshTask.account_id, false);
+    resultUrls.set(refreshTask.history_id, refreshedUrl);
+    const refreshed = await queryTask(owner, a, true);
+    pool.setAccountEnabled(refreshTask.account_id, true);
+    assert.equal(refreshed.status, 200); assert.equal(refreshed.body.data[0].url, refreshedUrl);
+    assert.deepEqual({ account_id: row(a).account_id, history_id: row(a).history_id, credential: row(a).credential }, refreshIdentity);
+    assert.equal(creditReads, beforeRefreshCredits, "signed URL refresh does not query balance or reservation state");
+    assert.equal(billingReads, beforeRefreshBilling, "signed URL refresh does not query consumption or billing state");
+    assert.equal(submits.length, beforeRefreshSubmits, "signed URL refresh cannot submit another generation");
+    assert.equal((await queryTask(owner + 99, a, true)).status, 404, "another API owner cannot refresh the original task");
+    const savedRefresh = row(a).result;
+    histories.set(refreshTask.history_id, 20);
+    assert.equal((await queryTask(owner, a, true)).status, 503);
+    assert.equal(row(a).status, "succeeded"); assert.equal(row(a).result, savedRefresh, "an incomplete refresh never downgrades or replaces the saved success");
+    histories.set(refreshTask.history_id, 50);
 
     const shortage = "queue_insufficient_quote_fixture", beforeShortage = submits.length;
     await createTask(owner, auth, { ...input(shortage), duration: 20 }); await runVideoQueueTick(); await wait(shortage, "failed");

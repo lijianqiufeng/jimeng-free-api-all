@@ -51,6 +51,11 @@ async function waitStatus(id: string, status: string) {
   while (get(id)?.status !== status && Date.now() < end) { await runVideoQueueTick(); await new Promise(resolve => setTimeout(resolve, 5)); }
   assert.equal(get(id)?.status, status);
 }
+async function waitAccepted(id: string) {
+  const end = Date.now() + 4000;
+  while (!["running", "succeeded"].includes(get(id)?.status) && Date.now() < end) { await runVideoQueueTick(); await new Promise(resolve => setTimeout(resolve, 5)); }
+  assert.ok(["running", "succeeded"].includes(get(id)?.status), "the original paid submission is accepted or already finished");
+}
 function cloneSource(id: string, edit: (task: any) => void = () => {}) {
   const row = { ...get(sampleId), id }, quote = JSON.parse(row.quote_json);
   quote.taskId = id; row.quote_json = JSON.stringify(quote); edit(row);
@@ -76,7 +81,7 @@ test("successful sample retains exact official source and exposes millisecond ex
 test("1080p final appends the official process on only the original account, preserving the sample", async () => {
   const original = { ...get(sampleId) }, before = submissions.length;
   await Promise.all([createTask(owner, auth, upgradeInput(upgradeId)), createTask(owner, auth, upgradeInput(upgradeId))]);
-  await waitStatus(upgradeId, "running");
+  await waitAccepted(upgradeId);
   assert.equal(submissions.length, before + 1);
   const submitted = submissions.at(-1), draft = submitted.draft, main = draft.component_list.at(-1), gen = main.abilities.gen_video;
   assert.match(submitted.cookie, /source-account/);

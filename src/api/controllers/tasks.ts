@@ -40,8 +40,32 @@ database.transaction(() => {
 }).immediate();
 database.exec("CREATE INDEX IF NOT EXISTS idx_canvas_video_hold ON canvas_tasks(kind, provider_hold, account_id)");
 const polling = new Map<string, Promise<void>>();
+const resultRefreshing = new Map<string, Promise<boolean>>();
 const videoDispatches = new Map<string, { controller: AbortController; done: Promise<void> }>();
 const get = (id: string) => database.prepare("SELECT * FROM canvas_tasks WHERE id = ?").get(id) as Task | undefined;
+
+function readTaskResult(response: any, task: Task) {
+  const longQuote = isLongVideo(task.model) && task.quote_json ? JSON.parse(task.quote_json) : undefined;
+  return taskResult(response, task.history_id, task.kind, isLongVideo(task.model) ? { model: task.model, submitId: longQuote?.mode === "long" && longQuote.taskId === task.id && longQuote.accountId === task.account_id ? longQuote.submitId : undefined } : undefined);
+}
+
+/** Refresh only the signed media URL of a successful video through its original account/history. */
+async function refreshSucceededVideoResult(task: Task) {
+  if (resultRefreshing.has(task.id)) return resultRefreshing.get(task.id)!;
+  const work = (async () => {
+    try {
+      const response = await request("post", "/mweb/v1/get_history_by_ids", readAccountSessionById(task.account_id), { timeout: 15_000, data: { history_ids: [task.history_id] } });
+      const result = readTaskResult(response, task);
+      if (result.status !== "succeeded") return false;
+      const media = JSON.stringify(result.urls.map((url) => ({ url })));
+      return database.prepare("UPDATE canvas_tasks SET result=?, checked_at=? WHERE id=? AND owner=? AND kind='video' AND status='succeeded' AND account_id=? AND history_id=?").run(media, Date.now(), task.id, task.owner, task.account_id, task.history_id).changes === 1;
+    } catch {
+      return false;
+    }
+  })().finally(() => resultRefreshing.delete(task.id));
+  resultRefreshing.set(task.id, work);
+  return work;
+}
 function sourceForUpgrade(id: string, owner: number) {
   const task = get(id);
   if (!task || task.owner !== owner || task.kind !== "video" || task.model !== "jimeng-video-seedance-2.5-draft" || task.source_task_id || task.status !== "succeeded" || task.provider_hold || !task.history_id || !task.account_id || !task.sample_snapshot_json || !task.quote_json) throw Error("原样片缺少完整来源或尚未成功，未提交高清生成");
@@ -72,9 +96,9 @@ function videoQueueReason(task: Task) {
 function publicVideoQuote(task: Task) {
   const quote = JSON.parse(task.quote_json || "null");
   if (!quote || typeof quote !== "object" || Array.isArray(quote)) return quote;
-  // Keep the billing contract visible without exposing provider identities,
-  // account labels or the retained raw submission evidence.
-  for (const key of ["accountName", "accountTier", "submitId", "draftId", "submissionReceipt", "submissionReconciliation"]) delete quote[key];
+  // submitId is part of the service-to-service long-video billing contract.
+  // Keep account labels, draft internals and retained raw evidence private.
+  for (const key of ["accountName", "accountTier", "draftId", "submissionReceipt", "submissionReconciliation"]) delete quote[key];
   return quote;
 }
 const publicTask = (task: Task) => {
@@ -321,9 +345,13 @@ export async function createTask(owner: number, authorization: string, body: unk
   return { status: 202, body: publicTask(get(input.id)!) };
 }
 
-export async function queryTask(owner: number, id: string) {
+export async function queryTask(owner: number, id: string, refreshResult = false) {
   let task = get(id);
   if (!task || task.owner !== owner) return { status: 404, body: { error: "任务不存在" } };
+  if (refreshResult && task.kind === "video" && task.status === "succeeded" && task.history_id && task.account_id) {
+    if (!await refreshSucceededVideoResult(task)) return { status: 503, body: { id: task.id, status: task.status, providerStatus: task.provider_status, error: "原视频结果地址暂时无法刷新，请稍后重试" } };
+    task = get(id)!;
+  }
   if ((task.kind === "video" ? task.provider_hold && task.history_id && task.credential : task.status === "running" && task.history_id && task.credential) && Date.now() - task.checked_at >= 5000) {
     if (!polling.has(id)) {
       const current = task;
@@ -332,8 +360,7 @@ export async function queryTask(owner: number, id: string) {
         const response = await request("post", "/mweb/v1/get_history_by_ids", decrypt(current.credential), { timeout: 15_000, data: { history_ids: [current.history_id], ...(current.kind === "image" ? { image_info: { width: 4096, height: 4096, format: "webp" } } : {}) } });
         const sample = current.model === "jimeng-video-seedance-2.5-draft" && !current.source_task_id;
         if (sample && Number(taskHistory(response, current.history_id)?.status) === 21) return;
-        const longQuote = isLongVideo(current.model) && current.quote_json ? JSON.parse(current.quote_json) : undefined;
-        const result = taskResult(response, current.history_id, current.kind, isLongVideo(current.model) ? { model: current.model, submitId: longQuote?.mode === "long" && longQuote.taskId === current.id && longQuote.accountId === current.account_id ? longQuote.submitId : undefined } : undefined);
+        const result = readTaskResult(response, current);
         if (result.status === "running") return;
         if (result.status === "failed" && current.account_id) {
           const cooldownMs = accountFailureCooldown(result.error);

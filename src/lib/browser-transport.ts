@@ -359,14 +359,14 @@ class BrowserTransport {
     options.onSubmitting?.();
 
     logger.info(`[浏览器传输] ${options.method.toUpperCase()} ${options.url}`);
-    let result = await page.evaluate(inPageRequest, {
+    let result = await this.evaluateWithAbort(page, {
       url: options.url,
       method: options.method.toUpperCase(),
       params: options.params || {},
       headers: options.headers || {},
       data: options.data ?? null,
       timeout: this.requestTimeout,
-    });
+    }, options.signal);
 
     // 浏览器或页面异常时重启一次
     if (result.status === 0 && result.error && options.retryOnFailure !== false) {
@@ -376,14 +376,14 @@ class BrowserTransport {
       const retryPage = await this.ensurePage();
       await this.applyCookies(options.cookiePairs);
       options.signal?.throwIfAborted();
-      result = await retryPage.evaluate(inPageRequest, {
+      result = await this.evaluateWithAbort(retryPage, {
         url: options.url,
         method: options.method.toUpperCase(),
         params: options.params || {},
         headers: options.headers || {},
         data: options.data ?? null,
         timeout: this.requestTimeout,
-      });
+      }, options.signal);
     }
 
     this.touch();
@@ -403,6 +403,22 @@ class BrowserTransport {
       data,
       config: {},
     };
+  }
+
+  /** Closing the exclusive browser aborts an in-page fetch and proves it left before the task releases. */
+  private async evaluateWithAbort(page: any, payload: Parameters<typeof inPageRequest>[0], signal?: AbortSignal) {
+    let closing: Promise<void> | undefined;
+    const abort = () => { closing ||= this.close(); };
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      signal?.throwIfAborted();
+      const result = await page.evaluate(inPageRequest, payload);
+      signal?.throwIfAborted();
+      return result;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      if (closing) await closing;
+    }
   }
 
   /**

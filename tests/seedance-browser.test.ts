@@ -149,3 +149,21 @@ test("generic browser transport switches equal-length account cookies and never 
     assert.equal(evaluations, 3);
   } finally { transport.browser = null; await browserTransport.setMode("off", false); }
 });
+
+test("generic browser transport closes and drains an active in-page request on abort", async () => {
+  const transport = browserTransport as any, controller = new AbortController();
+  let rejectEvaluate!: (error: Error) => void, started!: () => void, closed = 0;
+  const evaluating = new Promise<void>(resolve => { started = resolve; });
+  try {
+    await browserTransport.setMode("off", false);
+    await browserTransport.setMode("always", false);
+    transport.browser = { close: async () => { closed++; rejectEvaluate(Error("fixture browser closed")); } };
+    transport.context = { addCookies: async () => undefined };
+    transport.page = { isClosed: () => false, evaluate: async () => new Promise((_resolve, reject) => { rejectEvaluate = reject; started(); }) };
+    const request = browserTransport.request({ method: "POST", url: origin + path, params: {}, headers: {}, data: input().data, cookiePairs: [["sessionid", "account-a"]], signal: controller.signal, retryOnFailure: false });
+    await evaluating;
+    controller.abort(Error("fixture interrupted"));
+    await assert.rejects(request, /fixture browser closed|fixture interrupted/);
+    assert.equal(closed, 1); assert.equal(transport.page, null); assert.equal(transport.context, null);
+  } finally { transport.browser = null; transport.page = null; transport.context = null; await browserTransport.setMode("off", false); }
+});

@@ -246,6 +246,7 @@ const VIDEO_PROCESSING_STATES = [20, 42, 45];
 function extractVideoUrlFromItemList(itemList: any[] = []) {
   for (const item of itemList) {
     const url =
+      item?.video?.origin_video?.video_url ||
       item?.video?.transcoded_video?.origin?.video_url ||
       item?.video?.play_url ||
       item?.video?.download_url ||

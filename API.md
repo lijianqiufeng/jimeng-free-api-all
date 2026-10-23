@@ -36,7 +36,7 @@
 
 比例固定为 16:9、9:16、1:1、4:3、3:4、21:9，每任务一个视频。样片转高清使用独立的 `operation: "generate-from-draft"` 与原样片任务 ID；长视频仅接受动态配置确认的 720p 时长。创建前必须读到账号动态模型配置、当前权益和官方报价，失败不静默降级。所有视频型号及别名都不走旧 `/v1/videos/generations` 或聊天生成路径。
 
-状态为 queued / running / succeeded / failed / canceled / uncertain，成功 `data` 仅含本任务视频 URL。默认排队与提交期限为 30 分钟，已经取得历史 ID 的视频仍继续查询原任务；断线或重启不得 POST 新任务代替恢复。删除仅停止等待，不能保证撤销上游或退积分。任务成功后按原提交身份查询唯一 `Checked` 账单；账单未确认时返回 `billingPending` 并继续保留资金预留。
+状态为 queued / running / succeeded / failed / canceled / uncertain，成功 `data` 仅含本任务视频 URL。默认排队与提交期限为 30 分钟，已经取得历史 ID 的视频仍继续查询原任务；断线或重启不得 POST 新任务代替恢复。删除仅停止等待，不能保证撤销上游或退积分。任务成功后按原提交身份查询唯一 `Checked` 账单；账单未确认时返回 `billingPending` 并继续保留资金预留。成功视频的签名地址过期时，可调用 `GET /v1/tasks/:id?refreshResult=1`，服务只用该任务保存的原账号和原 history 刷新原画地址，不查询余额、不占槽也不发起生成。
 
 新视频只使用名称以 `_超级` 结尾且实时余额、能力满足要求的账号。调用前可读取：
 
@@ -282,11 +282,17 @@ curl -X POST http://localhost:8000/v1/tasks \
 curl -H "Authorization: Bearer jm_xxx" \
   http://localhost:8000/v1/tasks/canvas_video_example_0001
 
+# 成功视频下载地址过期时，显式刷新同一原任务的原画签名地址
+curl -H "Authorization: Bearer jm_xxx" \
+  'http://localhost:8000/v1/tasks/canvas_video_example_0001?refreshResult=1'
+
 curl -X DELETE -H "Authorization: Bearer jm_xxx" \
   http://localhost:8000/v1/tasks/canvas_video_example_0001
 ```
 
-查询可能返回 `queued`、`running`、`succeeded`、`failed`、`canceled` 或 `uncertain`。`uncertain` 表示付费提交回执无法确认；服务保留原账号与预留，不自动重提。成功但账单未确认时带有 `billingPending: true`。
+查询可能返回 `queued`、`running`、`succeeded`、`failed`、`canceled` 或 `uncertain`。`uncertain` 表示付费提交回执无法确认；服务保留原账号与预留，不自动重提。成功但账单未确认时带有 `billingPending: true`。`refreshResult=1` 只对成功视频生效，严格使用原任务的账号与 history 查询并优先返回 `origin_video.video_url`；刷新本身不触发账单或余额查询，失败返回 503，数据库中的原成功任务不降级、不换账号、不重新生成。
+
+视频已开始付费提交后，响应 `quote.submitId` 是主 API 冻结长视频报价并匹配最终账单所需的随机提交身份。CPA 仍隐藏账号名称、等级、草稿 ID 和原始提交回执；调用方只能将 `submitId` 绑定回同一个任务，不能据此创建或替换任务。
 
 #### 合同与报价
 

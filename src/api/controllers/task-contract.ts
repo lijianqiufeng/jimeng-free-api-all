@@ -51,7 +51,7 @@ export function taskResult(result: any, historyId: string, kind: "image" | "vide
   }
   const urls = (Array.isArray(history.item_list) ? history.item_list : []).map((item: any) => kind === "image"
     ? item?.image?.large_images?.[0]?.image_url
-    : item?.video?.transcoded_video?.origin?.video_url || item?.video?.play_url || item?.video?.download_url || item?.video?.url
+    : item?.video?.origin_video?.video_url || item?.video?.transcoded_video?.origin?.video_url || item?.video?.play_url || item?.video?.download_url || item?.video?.url
   ).filter((url: unknown): url is string => typeof url === "string" && /^https:\/\//i.test(url));
   // A canvas task requests exactly one image. Jimeng can keep the surrounding
   // conversation open for a separately confirmed batch after that image exists.

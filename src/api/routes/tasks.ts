@@ -22,7 +22,8 @@ async function handle(request: Request, create: boolean, interrupt = false) {
       return new Response({ error: publicAccountError(error) || "即梦参数无效或暂无可用账号，请检查模型、比例、清晰度、时长及参考图" }, { statusCode: 400 });
     }
   }
-  const result = request.method.toUpperCase() === "DELETE" ? cancelTask(auth.apiKeyId, String(request.params.id)) : await queryTask(auth.apiKeyId, String(request.params.id));
+  const refreshResult = ["1", "true"].includes(String(request.query?.refreshResult || "").toLowerCase());
+  const result = request.method.toUpperCase() === "DELETE" ? cancelTask(auth.apiKeyId, String(request.params.id)) : await queryTask(auth.apiKeyId, String(request.params.id), refreshResult);
   return new Response(result.body, { statusCode: result.status });
 }
 
