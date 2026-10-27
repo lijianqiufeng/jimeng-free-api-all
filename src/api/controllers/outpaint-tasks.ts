@@ -72,7 +72,11 @@ function publicTask(task: OutpaintTask) {
 
 async function ensureWorkspace(accountId: string, token: string) {
   const stored = database.prepare("SELECT workspace_id FROM native_outpaint_workspaces WHERE account_id=?").get(accountId) as { workspace_id: string } | undefined;
-  if (stored) return stored.workspace_id;
+  if (stored) {
+    const id = readOutpaintWorkspace(stored);
+    if (!id) throw Error("扩图原工作区身份无效，尚未提交生成");
+    return id;
+  }
   const pending = workspaces.get(accountId);
   if (pending) return pending;
   const work = (async () => {
@@ -108,7 +112,7 @@ async function dispatch(original: OutpaintTask, controller: AbortController) {
       const response = await request("post", "/mweb/v1/aigc_draft/generate", token, { timeout: 120_000, signal: controller.signal, params: outpaintRequestParams(task.submit_id), data: payload,
         beforeSubmit: () => { active(); }, onSubmitting: () => { if (!database.prepare("UPDATE native_outpaint_tasks SET status='submitting',paid_started_at=? WHERE id=? AND status='preparing' AND paid_started_at=0").run(Date.now(), task.id).changes) throw Error("扩图提交身份已变化，未重复提交"); } });
       const historyId = response?.aigc_data?.history_record_id;
-      if (historyId && /^[A-Za-z0-9:_-]{1,160}$/.test(String(historyId))) {
+      if (historyId && historyId !== "0" && /^[A-Za-z0-9:_-]{1,160}$/.test(String(historyId))) {
         database.prepare("UPDATE native_outpaint_tasks SET history_id=?,status=CASE WHEN status='canceled' THEN status ELSE 'running' END,error='',error_code='' WHERE id=? AND history_id='' AND paid_started_at>0").run(String(historyId), task.id);
       } else if (response?.fail_code && Number(response.fail_code) !== 0) {
         database.prepare("UPDATE native_outpaint_tasks SET status='failed',credential='',error='即梦已拒绝原生扩图请求，未自动重提',error_code='provider_rejected' WHERE id=? AND status='submitting' AND history_id=''").run(task.id);
@@ -130,6 +134,7 @@ export async function createOutpaintTask(owner: number, authorization: string, b
   try {
   const input = outpaintTaskInput(body), fingerprint = fingerprintOf(input, requestedAccountId || ""), previous = get(input.id);
   if (previous) return previous.owner !== owner || previous.fingerprint !== fingerprint ? { status: 409, body: { error: "扩图任务 ID 已绑定其他输入或归属", errorCode: "task_conflict" } } : { status: 200, body: publicTask(previous) };
+  if (process.env.JIMENG_NATIVE_OUTPAINT_CREATE_ENABLED === "false") return { status: 503, body: { error: "即梦原生扩图已暂停新提交，原任务仍可查询或取消", errorCode: "create_disabled" } };
   const credential = await resolveAuthorization(authorization, requestedAccountId, "jimeng-outpaint", true, false);
   if (!credential.accountId) throw Error("原生扩图必须使用托管账号");
   const now = Date.now(), { image, id, prompt, width, height, ...geometry } = input;

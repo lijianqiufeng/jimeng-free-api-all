@@ -5,7 +5,7 @@ import path from "node:path";
 import axios from "axios";
 import { database, createApiKey, validateApiKey } from "@/lib/database.ts";
 import accountPool, { encrypt } from "@/lib/account-pool.ts";
-import { OUTPAINT_RATIOS, buildOutpaintRequest, outpaintHistoryResult, outpaintRequestParams, outpaintTaskInput } from "@/api/controllers/outpaint-protocol.ts";
+import { OUTPAINT_RATIOS, buildOutpaintRequest, outpaintHistoryResult, outpaintRequestParams, outpaintTaskInput, readOutpaintWorkspace, refreshOutpaintResults } from "@/api/controllers/outpaint-protocol.ts";
 import { createOutpaintTask, queryOutpaintTask, cancelOutpaintTask, recoverOutpaintTasksAfterRestart } from "@/api/controllers/outpaint-tasks.ts";
 import route from "@/api/routes/outpaint-tasks.ts";
 
@@ -20,7 +20,7 @@ const managed = createApiKey("native outpaint fixture"), owner = validateApiKey(
 const second = createApiKey("other native fixture"), otherOwner = validateApiKey(second.key).apiKeyId!;
 const account = accountPool.create({ name: "native fixture", sessionId: "native-outpaint-fake-session" });
 accountPool.grantLease(owner, account.id);
-let mode: "ok" | "timeout" | "reject" | "missing" = "ok", generateCalls = 0, workspaceCreates = 0, uploadHold: Promise<void> | undefined;
+let mode: "ok" | "timeout" | "reject" | "missing" | "zero-string" | "zero-number" = "ok", generateCalls = 0, workspaceCreates = 0, uploadHold: Promise<void> | undefined;
 let uploadedWidth = 1, uploadedHeight = 1, uploadAttempts = 0, activeUploads = 0, maximumUploads = 0;
 const fixtureAccounts = new Set([account.id]), uploadedBodies: Buffer[] = [];
 const payloads: any[] = [], histories = new Map<string, any>(), queried: string[] = [];
@@ -47,6 +47,7 @@ axios.defaults.adapter = async config => {
     if (mode === "timeout") throw Object.assign(Error("fixture timeout"), { code: "ETIMEDOUT" });
     if (mode === "reject") return raw({ ret: "4013", errmsg: "原请求被拒绝" });
     if (mode === "missing") return ok({});
+    if (mode === "zero-string" || mode === "zero-number") return ok({ aigc_data: { history_record_id: mode === "zero-string" ? "0" : 0 }, fail_code: 0 });
     const id = `history-${body.submit_id}`;
     histories.set(id, { history_record_id: id, submit_id: body.submit_id, status: 50, item_list: [{ image: { width: 2048, height: 2048, large_images: [{ image_url: "https://fixture.invalid/outpaint.png", width: 2048, height: 2048 }] } }] });
     return ok({ aigc_data: { history_record_id: id }, fail_code: 0 });
@@ -56,6 +57,77 @@ axios.defaults.adapter = async config => {
 };
 
 describe("native outpaint isolated contract", { concurrency: 1 }, () => {
+  test("native create gate rejects new IDs before account or input persistence and retains original query and cancellation", async () => {
+    const previousFlag = process.env.JIMENG_NATIVE_OUTPAINT_CREATE_ENABLED, body = input("outpaint_create_gate_existing_123");
+    try {
+      delete process.env.JIMENG_NATIVE_OUTPAINT_CREATE_ENABLED;
+      await createOutpaintTask(owner, authorization, body, account.id); await until(() => row(body.id).status === "running");
+      const submitId = row(body.id).submit_id, historyId = row(body.id).history_id, before = generateCalls, queries = queried.length;
+      process.env.JIMENG_NATIVE_OUTPAINT_CREATE_ENABLED = "false";
+      const blockedId = "outpaint_create_gate_blocked_123", files = fs.readdirSync(path.join(path.dirname(process.env.DB_PATH!), "private", "native-outpaint"));
+      const blocked = await createOutpaintTask(owner, authorization, input(blockedId), "account-does-not-exist");
+      assert.equal(blocked.status, 503); assert.equal((blocked.body as any).errorCode, "create_disabled"); assert.equal(row(blockedId), undefined);
+      assert.deepEqual(fs.readdirSync(path.join(path.dirname(process.env.DB_PATH!), "private", "native-outpaint")), files);
+      assert.equal((await createOutpaintTask(owner, authorization, body, account.id)).status, 200);
+      assert.equal((await createOutpaintTask(otherOwner, `Bearer ${second.key}`, body, account.id)).status, 409);
+      assert.equal((await createOutpaintTask(owner, authorization, { ...body, prompt: "changed" }, account.id)).status, 409);
+      assert.equal(cancelOutpaintTask(owner, body.id, account.id).body.status, "canceled");
+      const recovered = await queryOutpaintTask(owner, body.id, account.id);
+      assert.equal(recovered.body.status, "succeeded"); assert.ok(recovered.body.data?.length);
+      assert.equal(row(body.id).submit_id, submitId); assert.equal(row(body.id).history_id, historyId); assert.equal(row(body.id).account_id, account.id);
+      assert.equal(queried.length, queries + 1); assert.equal(queried.at(-1), historyId); assert.equal(generateCalls, before);
+    } finally { if (previousFlag === undefined) delete process.env.JIMENG_NATIVE_OUTPAINT_CREATE_ENABLED; else process.env.JIMENG_NATIVE_OUTPAINT_CREATE_ENABLED = previousFlag; }
+  });
+
+  test("zero native result identities use original order and object paths while valid item IDs retain identity", () => {
+    const items = Array.from({ length: 4 }, (_, index) => ({ common_attr: { id: index % 2 ? "0" : 0 }, image: { large_images: [{ image_url: `https://fixture.invalid/zero-${index}.png?signature=old`, width: 2048, height: 2048 }] } }));
+    const parse = (values: any[]) => outpaintHistoryResult({ original: { history_record_id: "original", submit_id: "fixed-submit", status: 50, item_list: values } }, "original", "fixed-submit");
+    const allMissing = parse(items);
+    assert.equal(allMissing.status, "succeeded"); assert.equal(allMissing.data?.length, 4);
+    assert.ok(allMissing.data?.every(item => !Object.hasOwn(item, "itemId")));
+    const mixed = parse(items.map((item, index) => index >= 2 ? { ...item, common_attr: { id: index === 2 ? "native-valid" : 42 } } : item));
+    assert.deepEqual(mixed.data?.map(item => item.itemId), [undefined, undefined, "native-valid", "42"]);
+    const previous = mixed.data!, before = structuredClone(previous);
+    const fresh = previous.map(item => ({ ...item, url: item.url.replace("old", "fresh") }));
+    const updated = refreshOutpaintResults(previous, [fresh[0], fresh[1], fresh[3], fresh[2]]);
+    assert.deepEqual(updated.map(item => [item.index, item.itemId]), previous.map(item => [item.index, item.itemId]));
+    assert.ok(updated.every(item => item.url.endsWith("signature=fresh")));
+    assert.throws(() => refreshOutpaintResults(previous, [...fresh].reverse()), /身份变化/);
+    assert.deepEqual(previous, before);
+  });
+
+  test("zero native workspace identities are rejected before paid submission and valid cached identity remains bound", async () => {
+    for (const id of [0, "0"]) for (const wrapped of [{ workspace_id: id }, { workspace: { workspace_id: id } }, { workspaces: [{ id }] }]) assert.equal(readOutpaintWorkspace(wrapped), undefined);
+    assert.equal(readOutpaintWorkspace({ workspace_id: 123 }), "123");
+    assert.equal(readOutpaintWorkspace({ workspace_id: "native-fixture-workspace" }), "native-fixture-workspace");
+    database.prepare("INSERT INTO native_outpaint_workspaces(account_id,workspace_id) VALUES (?,?)").run(account.id, "0");
+    const body = input("outpaint_zero_workspace_123"), before = generateCalls, creates = workspaceCreates;
+    try {
+      await createOutpaintTask(owner, authorization, body, account.id); await until(() => row(body.id).status === "failed");
+      assert.equal(row(body.id).paid_started_at, 0); assert.equal(row(body.id).history_id, "");
+      assert.equal(generateCalls, before); assert.equal(workspaceCreates, creates);
+      assert.equal((database.prepare("SELECT workspace_id FROM native_outpaint_workspaces WHERE account_id=?").get(account.id) as any).workspace_id, "0");
+    } finally { database.prepare("DELETE FROM native_outpaint_workspaces WHERE account_id=?").run(account.id); }
+  });
+
+  test("zero native history identities stay unconfirmed with the same submit and account without a replay", async () => {
+    try {
+      for (const state of ["zero-string", "zero-number"] as const) {
+        mode = state; const body = input(`outpaint_${state.replace("-", "_")}_12345`), before = generateCalls, queryCount = queried.length;
+        await createOutpaintTask(owner, authorization, body, account.id); await until(() => row(body.id).status === "uncertain");
+        const submitId = row(body.id).submit_id;
+        assert.equal(row(body.id).history_id, ""); assert.equal(row(body.id).account_id, account.id); assert.ok(row(body.id).credential);
+        assert.equal(row(body.id).error_code, "submission_unconfirmed"); assert.equal(generateCalls, before + 1);
+        assert.equal((await createOutpaintTask(owner, authorization, body, account.id)).status, 200);
+        const pending = await queryOutpaintTask(owner, body.id, account.id); recoverOutpaintTasksAfterRestart();
+        assert.equal(pending.body.submission.state, "unconfirmed"); assert.equal(row(body.id).status, "uncertain");
+        assert.equal(row(body.id).submit_id, submitId); assert.equal(row(body.id).account_id, account.id);
+        assert.equal(generateCalls, before + 1); assert.equal(queried.length, queryCount);
+        assert.equal((database.prepare("SELECT workspace_id FROM native_outpaint_workspaces WHERE account_id=?").get(account.id) as any).workspace_id, "native-fixture-workspace");
+      }
+    } finally { mode = "ok"; }
+  });
+
   test("uses actual image dimensions and enforces explicit input, geometry and local safety limits", () => {
     const valid = outpaintTaskInput(input("outpaint_contract_1234"));
     assert.equal(valid.width, 1); assert.equal(valid.height, 1);

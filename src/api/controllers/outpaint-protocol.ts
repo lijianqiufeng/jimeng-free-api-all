@@ -46,7 +46,7 @@ export function outpaintRequestParams(submitId: string) {
 export function readOutpaintWorkspace(value: any): string | undefined {
   const workspace = value?.workspace || value?.workspaces?.[0] || value?.workspace_list?.[0] || value;
   const id = workspace?.workspace_id ?? workspace?.workspaceId ?? workspace?.id;
-  return typeof id === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(id) || typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? String(id) : undefined;
+  return id !== "0" && (typeof id === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(id) || typeof id === "number" && Number.isSafeInteger(id) && id > 0) ? String(id) : undefined;
 }
 
 export function outpaintHistoryResult(value: any, historyId: string, submitId: string) {
@@ -62,7 +62,7 @@ export function outpaintHistoryResult(value: any, historyId: string, submitId: s
     const image = item?.image, large = image?.large_images?.[0], url = large?.image_url;
     if (typeof url !== "string" || !/^https:\/\//i.test(url)) return { status: "running" as const };
     const width = Number(large.width ?? image.width), height = Number(large.height ?? image.height);
-    const id = item?.common_attr?.id ?? item?.id, itemId = (typeof id === "string" || Number.isSafeInteger(id)) && /^[A-Za-z0-9:_-]{1,160}$/.test(String(id)) ? String(id) : undefined;
+    const id = item?.common_attr?.id ?? item?.id, itemId = id !== 0 && id !== "0" && (typeof id === "string" || Number.isSafeInteger(id)) && /^[A-Za-z0-9:_-]{1,160}$/.test(String(id)) ? String(id) : undefined;
     data.push({ index, ...(itemId ? { itemId } : {}), url, ...(Number.isSafeInteger(width) && width > 0 ? { width } : {}), ...(Number.isSafeInteger(height) && height > 0 ? { height } : {}) });
   }
   const ids = data.flatMap(item => item.itemId ? [item.itemId] : []);

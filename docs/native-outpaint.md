@@ -10,6 +10,8 @@
 
 只接受有效的管理端 `jm_` Bearer Key，原生 Session ID 不可直接调用。可选 `X-Jimeng-Account-Id` 绑定当前 Key 已有租约；读取、取消及回执始终沿用原账号。
 
+`JIMENG_NATIVE_OUTPAINT_CREATE_ENABLED` 仅显式设为 `false` 时暂停新ID创建，返回503，且不解析账号或持久化原图；默认开放。已有ID仍按原归属和输入校验后幂等读取，GET、DELETE和原任务查询继续可用。回退时可关闭新提交并隐藏Web入口，同时保留新版任务查询，不能退回不认识原生任务的旧CPA后宣称原任务仍可恢复。
+
 创建 JSON：
 
 ```json
@@ -44,6 +46,8 @@ JPEG 的 EXIF 方向由 `image-size` 读取，方向5–8只交换几何宽高�
 
 新表 `native_outpaint_tasks` 独立保存输入指纹、原账号、加密凭据、固定 submitId、上传 URI 和原 historyId。付费发送前先持久化提交标记，再通过已有签名客户端发送一次 `/mweb/v1/aigc_draft/generate`。超时或缺回执标记为 `uncertain`，同 ID 不再生成；已取得原 historyId 时仅查询 `/mweb/v1/get_history_by_ids`。重启不会恢复付费 POST，也不会切换账号重试。
 
+工作区和history的数字或字符串`0`均不是有效身份；无效缓存工作区在付费前停止且保留原登记，无效history回执保留原账号、submitId和待核状态，不查询`0`或重发。成果itemId的`0`视为缺失，沿用原索引及URL对象路径校验，不把四个默认`0`判作四张重复成果，也不伪造itemId。
+
 状态包括 `preparing/submitting/running/uncertain/succeeded/failed/canceled`。`submission.state` 区分准备、未提交、已受理、回执未确认及明确拒绝。没有真实账单证据，因此不返回猜测的 `creditsUsed`。
 
 DELETE 在准备阶段中断上传并阻止生成；已发送后只停止本地等待，响应明确提示上游可能继续，保留原身份以便查询成果。后续 GET 仍只查该原 history；读回真实成果后返回 succeeded，允许调用方的手动“查询原任务”取回已付费成果。没有使用未经证实的上游取消 body，也不把本地取消声称为上游已经取消。不存在任务的取消会留下归属墓碑，阻止迟到的同 ID 创建。
@@ -72,3 +76,5 @@ DELETE 在准备阶段中断上传并阻止生成；已发送后只停止本地�
 资源并发、排队取消与超时、EXIF原字节和成功URL刷新增量验证使用 `node tools/test-outpaint-isolated.mjs 'resource slots|EXIF uses|signed URL refresh'`，只执行这3项新增mock，不重复此前专项。
 
 多成果增量验证使用 `node tools/test-outpaint-isolated.mjs 'multi-result'`，只执行3项新增mock：明确完成前不提前接纳、一次提交保留四张、签名刷新维持原成果顺序、数量/身份变化保留旧成果、超过四张待核及仅查询原历史恢复。
+
+默认身份补正分批仅执行新增scope：`'zero native'`前两项、随后`'zero native result identities'`一项，以及`'native create gate'`一项。各批均使用独立净化环境与数据库；前批通过后未重跑，既有专项和真实付费不在这些记录中。
