@@ -12,6 +12,7 @@ import accountPool from './account-pool.ts';
 import accountStatus from './account-status.ts';
 import tasks from './tasks.ts';
 import upscaleTasks from './upscale-tasks.ts';
+import outpaintTasks from './outpaint-tasks.ts';
 
 export default [
     {
@@ -51,5 +52,6 @@ export default [
     accountPool,
     accountStatus,
     tasks,
-    upscaleTasks
+    upscaleTasks,
+    outpaintTasks
 ];
