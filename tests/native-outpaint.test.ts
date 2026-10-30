@@ -373,3 +373,35 @@ describe("native outpaint isolated contract", { concurrency: 1 }, () => {
     assert.equal(generateCalls, before + 1); assert.equal(row(body.id).history_id, historyId); assert.equal(row(body.id).submit_id, submitId);
   });
 });
+
+
+test("official outpaint billing persists after pending without new generation and skips legacy rows", async () => {
+  const adapter = axios.defaults.adapter as any, before = generateCalls;
+  let billingRows: any[] = [], billingCalls = 0;
+  axios.defaults.adapter = async config => {
+    if (String(config.url).endsWith("/commerce/v1/benefits/user_credit_history")) {
+      billingCalls++;
+      return { data: { ret: "0", data: { records: billingRows, has_more: false } }, status: 200, statusText: "OK", headers: {}, config };
+    }
+    return adapter(config);
+  };
+  try {
+    const body = input("outpaint_official_billing_original_123");
+    await createOutpaintTask(owner, authorization, body, account.id); await until(() => row(body.id).status === "running");
+    const historyId = row(body.id).history_id, submitId = row(body.id).submit_id, history = histories.get(historyId);
+    histories.set(historyId, { ...history, item_list: Array.from({ length: 4 }, (_, index) => ({ id: `billing-result-${index}`, image: { large_images: [{ image_url: `https://fixture.invalid/billing-${index}.png`, width: 2048, height: 2048 }] } })) });
+    const pending = await queryOutpaintTask(owner, body.id, account.id);
+    assert.equal(pending.body.status, "succeeded"); assert.equal(pending.body.data?.length, 4); assert.equal(pending.body.billingPending, true); assert.equal(pending.body.creditsUsed, undefined);
+    billingRows = [{ history_id: "official-outpaint-credit-123", submit_id: submitId, history_type: 2, status: "Checked", amount: 7, origin_credit_amount: 9 }];
+    database.prepare("UPDATE native_outpaint_tasks SET checked_at=0 WHERE id=?").run(body.id);
+    const settled = await queryOutpaintTask(owner, body.id, account.id);
+    assert.equal(settled.body.creditsUsed, 7); assert.equal(settled.body.billing?.taskId, body.id); assert.equal(settled.body.billing?.historyId, historyId); assert.deepEqual(settled.body.data, pending.body.data);
+    assert.equal(JSON.parse(row(body.id).billing_json).billing.amount, 7);
+    const observed = billingCalls;
+    database.prepare("UPDATE native_outpaint_tasks SET checked_at=0 WHERE id=?").run(body.id); await queryOutpaintTask(owner, body.id, account.id);
+    assert.equal(billingCalls, observed); assert.equal(generateCalls, before + 1);
+    database.prepare("INSERT INTO native_outpaint_tasks(id,owner,status,account_id,credential,submit_id,history_id,parameters,deadline,created_at) VALUES('legacy_outpaint_billing_original_123',?,'running',?,?,?,?, '{}',?,?)").run(owner, account.id, encrypt("native-outpaint-fake-session"), submitId, historyId, Date.now() + 60000, Date.now());
+    const legacy = await queryOutpaintTask(owner, "legacy_outpaint_billing_original_123", account.id);
+    assert.equal(legacy.body.creditsUsed, undefined); assert.equal(legacy.body.billingPending, undefined); assert.equal(billingCalls, observed);
+  } finally { axios.defaults.adapter = adapter; }
+});

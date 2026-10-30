@@ -6,11 +6,12 @@ import { encrypt, decrypt, getAccount } from "@/lib/account-pool.ts";
 import { resolveAuthorization, markCredentialFailure } from "./auth.ts";
 import { request, uploadFile, withVideoRequestSignal, videoSubmissionReceipt } from "./core.ts";
 import { buildOutpaintRequest, outpaintHistoryResult, outpaintRequestParams, outpaintTaskInput, readOutpaintWorkspace, refreshOutpaintResults, type OutpaintInput } from "./outpaint-protocol.ts";
+import { readOutpaintBilling, type OutpaintBilling } from "./outpaint-billing.ts";
 
 const UNCONFIRMED = "即梦原生扩图提交回执未确认，保留原编号和账号，未自动重新提交";
 const NOT_FOUND = "扩图任务不存在";
 const DEADLINE_MS = 60 * 60_000;
-type OutpaintTask = { id: string; owner: number; fingerprint: string; status: string; account_id: string; requested_account_id: string; credential: string; submit_id: string; history_id: string; image_uri: string; workspace_id: string; parameters: string; payload_path: string; result: string; error: string; error_code: string; deadline: number; checked_at: number; paid_started_at: number; created_at: number };
+type OutpaintTask = { id: string; owner: number; fingerprint: string; status: string; account_id: string; requested_account_id: string; credential: string; submit_id: string; history_id: string; image_uri: string; workspace_id: string; parameters: string; payload_path: string; result: string; error: string; error_code: string; deadline: number; checked_at: number; paid_started_at: number; created_at: number; billing_json: string | null };
 
 database.pragma("synchronous = FULL");
 database.exec(`CREATE TABLE IF NOT EXISTS native_outpaint_tasks (
@@ -20,6 +21,7 @@ database.exec(`CREATE TABLE IF NOT EXISTS native_outpaint_tasks (
   parameters TEXT NOT NULL DEFAULT '{}', payload_path TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', error_code TEXT NOT NULL DEFAULT '',
   deadline INTEGER NOT NULL, checked_at INTEGER NOT NULL DEFAULT 0, paid_started_at INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL
 ); CREATE TABLE IF NOT EXISTS native_outpaint_workspaces (account_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL);`);
+if (!(database.pragma("table_info(native_outpaint_tasks)") as { name: string }[]).some(column => column.name === "billing_json")) database.exec("ALTER TABLE native_outpaint_tasks ADD COLUMN billing_json TEXT");
 export function recoverOutpaintTasksAfterRestart() {
   database.prepare("UPDATE native_outpaint_tasks SET status=CASE WHEN paid_started_at>0 THEN 'uncertain' ELSE 'failed' END,error=CASE WHEN paid_started_at>0 THEN ? ELSE '服务重启中断原图准备，未提交扩图' END,error_code=CASE WHEN paid_started_at>0 THEN 'submission_unconfirmed' ELSE 'preparation_failed' END,credential=CASE WHEN paid_started_at>0 THEN credential ELSE '' END WHERE status IN ('preparing','submitting','running') AND history_id=''").run(UNCONFIRMED);
   database.prepare("UPDATE native_outpaint_tasks SET status='running' WHERE status IN ('preparing','submitting','uncertain') AND history_id!='' AND credential!=''").run();
@@ -65,9 +67,11 @@ for (const task of database.prepare("SELECT * FROM native_outpaint_tasks WHERE p
 
 function publicTask(task: OutpaintTask) {
   const parameters = JSON.parse(task.parameters);
+  const billing = task.billing_json ? JSON.parse(task.billing_json) as { version: number; billing?: OutpaintBilling } : null;
   return { id: task.id, operation: "outpaint", status: task.status, ...(task.account_id ? { accountId: task.account_id } : {}), ...parameters,
     submission: { state: task.history_id ? "accepted" : task.paid_started_at ? task.error_code === "provider_rejected" ? "rejected" : "unconfirmed" : task.status === "preparing" ? "preparing" : "unsubmitted", ...(task.submit_id ? { submitId: task.submit_id } : {}), ...(task.history_id ? { historyId: task.history_id } : {}) },
-    ...(task.result ? { data: JSON.parse(task.result) } : {}), ...(task.error ? { error: task.error, errorCode: task.error_code } : {}) };
+    ...(task.result ? { data: JSON.parse(task.result) } : {}), ...(task.error ? { error: task.error, errorCode: task.error_code } : {}),
+    ...(billing?.billing ? { billing: billing.billing, creditsUsed: billing.billing.amount } : billing?.version === 1 && task.status === "succeeded" ? { billingPending: true } : {}) };
 }
 
 async function ensureWorkspace(accountId: string, token: string) {
@@ -141,7 +145,7 @@ export async function createOutpaintTask(owner: number, authorization: string, b
   const file = payloadPath({ owner, id, fingerprint });
   await persistPayload(file, input);
   let inserted;
-  try { inserted = database.prepare("INSERT OR IGNORE INTO native_outpaint_tasks(id,owner,fingerprint,status,account_id,requested_account_id,credential,submit_id,parameters,payload_path,deadline,created_at) VALUES (?,?,?,'preparing',?,?,?,?,?,?,?,?)").run(id, owner, fingerprint, credential.accountId, requestedAccountId || "", encrypt(credential.token), randomUUID(), JSON.stringify({ ...geometry, sourceWidth: width, sourceHeight: height }), file, now + DEADLINE_MS, now); }
+  try { inserted = database.prepare("INSERT OR IGNORE INTO native_outpaint_tasks(id,owner,fingerprint,status,account_id,requested_account_id,credential,submit_id,parameters,payload_path,deadline,created_at,billing_json) VALUES (?,?,?,'preparing',?,?,?,?,?,?,?,?,?)").run(id, owner, fingerprint, credential.accountId, requestedAccountId || "", encrypt(credential.token), randomUUID(), JSON.stringify({ ...geometry, sourceWidth: width, sourceHeight: height }), file, now + DEADLINE_MS, now, JSON.stringify({ version: 1 })); }
   catch (error) { if (get(id)?.payload_path !== file) await unlink(file).catch(() => undefined); throw error; }
   if (!inserted.changes) {
     const existing = get(id)!; if (existing.payload_path !== file || !["preparing", "submitting"].includes(existing.status)) await unlink(file).catch(() => undefined);
@@ -166,6 +170,12 @@ export async function queryOutpaintTask(owner: number, id: string, requestedAcco
           if (snapshot.result && result.status === "uncertain") throw Error(result.error);
           const data = result.status === "succeeded" ? snapshot.result ? refreshOutpaintResults(JSON.parse(snapshot.result), result.data) : result.data : undefined;
           if (result.status !== "running" && !(snapshot.status === "succeeded" && result.status !== "succeeded")) database.prepare("UPDATE native_outpaint_tasks SET status=?,result=?,credential=CASE WHEN ?='failed' THEN '' ELSE credential END,error=?,error_code=? WHERE id=? AND account_id=? AND history_id=? AND submit_id=? AND status IN ('running','canceled','uncertain','succeeded')").run(result.status, data ? JSON.stringify(data) : "", result.status, result.status === "failed" || result.status === "uncertain" ? result.error : "", result.status === "failed" ? "provider_rejected" : result.status === "uncertain" ? result.errorCode : "", id, snapshot.account_id, snapshot.history_id, snapshot.submit_id);
+          const saved = snapshot.billing_json ? JSON.parse(snapshot.billing_json) as { version: number; billing?: OutpaintBilling } : null;
+          if (result.status === "succeeded" && saved?.version === 1 && !saved.billing) try {
+            const history = response?.[snapshot.history_id] || [...(response?.history_list || []), ...(response?.history_records || [])].find((item: any) => String(item?.history_record_id || item?.id) === snapshot.history_id);
+            const billing = await readOutpaintBilling(decrypt(snapshot.credential), snapshot, history);
+            if (billing) database.prepare("UPDATE native_outpaint_tasks SET billing_json=? WHERE id=? AND account_id=? AND history_id=? AND submit_id=? AND billing_json=? AND status='succeeded'").run(JSON.stringify({ version: 1, billing }), id, snapshot.account_id, snapshot.history_id, snapshot.submit_id, snapshot.billing_json);
+          } catch { /* Keep complete results and retry only the original bill on a later query. */ }
         } catch (error) {
           if (snapshot.result && error instanceof Error && /^原扩图成果|^原扩图返回/.test(error.message)) database.prepare("UPDATE native_outpaint_tasks SET error=?,error_code='result_refresh_unconfirmed' WHERE id=? AND history_id=? AND submit_id=? AND result=?").run(error.message, id, snapshot.history_id, snapshot.submit_id, snapshot.result);
           // Query failures keep the original history/account and every previous result; never repeat generation.
