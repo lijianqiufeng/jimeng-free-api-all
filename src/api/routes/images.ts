@@ -58,7 +58,7 @@ export default {
         )
         .validate("headers.authorization", _.isString);
       // refresh_token切分
-      const credential = await resolveAuthorization(request.headers.authorization, undefined, request.body.model || DEFAULT_MODEL);
+      const credential = await resolveAuthorization(request.headers.authorization, undefined, request.body.model || DEFAULT_MODEL, false, false, request.body.resolution || "2k");
       const token = credential.token;
       const statsKey = credential.managedKey || token;
       // 随机挑选一个refresh_token

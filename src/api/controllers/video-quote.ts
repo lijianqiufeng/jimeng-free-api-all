@@ -21,7 +21,7 @@ async function readSnapshots() {
   if (!accounts.length) throw Error("没有可读取视频报价的超级账号");
   const key = JSON.stringify(accounts.map(account => [account.id, account.name]).sort(([left], [right]) => left.localeCompare(right)));
   if (cache?.key === key && cache.expires > Date.now()) return cache.value;
-  const value = Promise.all(accounts.map(async account => {
+  const value: Promise<Snapshot[]> = Promise.allSettled(accounts.map(async account => {
     // No account selection, lease, task admission, balance refresh or usage reporting.
     const token = readAccountSessionById(account.id), models = await fetchVideoModelConfigs(token, true);
     const benefits = new Set<string>();
@@ -38,7 +38,12 @@ async function readSnapshots() {
     const rules = metadata?.metadata_list?.filter((item: any) => item.resource_type === "aigc" && item.resource_id === "generate_video").flatMap((item: any) => item.benefits_pay_strategy || []);
     if (!Array.isArray(rules) || !Array.isArray(userBenefits?.asset_list)) throw Error("官方视频报价响应不完整");
     return { accountId: account.id, accountName: account.name, models, rules, assets: userBenefits.asset_list, checkedAt: new Date(Date.now()).toISOString() };
-  }));
+  })).then(results => {
+    const snapshots = results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+    if (snapshots.length !== accounts.length && cache?.value === value) cache.expires = Date.now() + 10_000;
+    if (!snapshots.length) throw Error("候选账号官方视频报价读取失败");
+    return snapshots;
+  });
   cache = { key, expires: Date.now() + 60_000, value };
   value.catch(() => { if (cache?.value === value) cache.expires = Date.now() + 10_000; });
   return value;
@@ -103,11 +108,14 @@ export async function quoteVideo(authorization: string, rawInput: any) {
     const snapshots = await readSnapshots();
     const eligible = isLongVideo(input.model) ? snapshots.filter(snapshot => snapshot.models.some(model => model.id === input.model && model.mode === "long" && model.supportedDurations?.includes(input.duration))) : snapshots;
     if (!eligible.length) throw Error("当前账号未开放所选超长视频参数");
-    const prices = eligible.map(snapshot => {
+    const prices = eligible.flatMap(snapshot => {
+      try {
       const price = snapshotPrice(input, snapshot), time = Date.parse(price.checkedAt);
       const promoted = input.model === "jimeng-video-seedance-2.5" && input.resolution === "720p" && input.hasVideo && price.benefitType === "seedance_25_720p_output" && accountTier(snapshot.accountName || "") === "super" && time >= Date.parse(superPromotion.startsAt) && time < Date.parse(superPromotion.endsAt) && price.discountMultiplier === superPromotion.multiplier;
-      return { ...price, promoted };
+      return [{ ...price, promoted }];
+      } catch { return []; }
     });
+    if (!prices.length) throw Error("当前参数没有已确认的账号报价");
     if (new Set(prices.map(price => price.benefitType)).size !== 1) throw Error("账号官方计费项不一致");
     const durations = isLongVideo(input.model) ? prices[0].supportedDurations!.filter(seconds => prices.every(price => price.supportedDurations?.includes(seconds))) : [];
     const step = durations.length > 1 ? durations[1] - durations[0] : prices[0].durationRange?.step;

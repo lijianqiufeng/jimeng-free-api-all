@@ -45,7 +45,7 @@ export default {
       request.validate("headers.authorization", (value) => typeof value === "string");
       let credential: ResolvedCredential | undefined;
       try {
-        credential = await resolveAuthorization(request.headers.authorization, request.headers["x-jimeng-account-id"], request.headers["x-jimeng-account-id"] ? "" : request.headers["x-jimeng-model"]);
+        credential = await resolveAuthorization(request.headers.authorization, request.headers["x-jimeng-account-id"], request.headers["x-jimeng-account-id"] ? "" : request.headers["x-jimeng-model"], false, undefined, request.headers["x-jimeng-resolution"] || "2k");
         if (credential.accountId) {
           const account = await accountPool.refreshStatus(credential.accountId);
           // A read-only balance success must not clear a generation risk cooldown.

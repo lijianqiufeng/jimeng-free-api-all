@@ -7,10 +7,11 @@ import { build } from "esbuild";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const allowed = [
+  "credit-floor", "credit-floor-dispatch",
   "account-selection", "agent-upscale-client", "agent-upscale-protocol", "agent-upscale-routes", "agent-upscale-tasks",
   "canvas-tasks", "premium-images", "seedance-browser", "seedance-draft", "seedance-draft-upgrade", "seedance-tasks",
   "seedance-upload", "task-errors", "upscale-console", "upscale-ui", "video-billing", "video-queue",
-  "video-queue-settings", "video-quote", "outpaint-billing",
+  "video-queue-settings", "video-quote", "video-dispatch-admission", "outpaint-billing",
 ];
 const requested = process.argv.slice(2);
 const tests = !requested.length || requested.length === 1 && requested[0] === "all" ? [...allowed] : requested;

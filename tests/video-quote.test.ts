@@ -22,6 +22,7 @@ axios.defaults.adapter = async config => {
   assert.ok(!String(config.headers?.Cookie).includes("fixture-excluded-advanced"), "advanced accounts must not enter the new video quote pool");
   calls.push(pathname);
   const ok = (data: unknown) => ({ data: { ret: "0", data }, status: 200, statusText: "OK", headers: {}, config });
+  if (pathname.endsWith("/benefit_metadata") && (mode === "all-unavailable" || String(config.headers?.Cookie).includes("fixture-unavailable"))) return ok({});
   if (pathname.endsWith("/video_generate/get_common_config")) return ok({ models: specs.map(([key, id, resolutions]) => ({ model_req_key: key, model_status: 0, ...(id === "jimeng-video-seedance-2.5-draft" ? { extra: { is_draft_mode: true } } : {}), options: [{ key: "resolution", enum_val: { string_value: resolutions } }, { key: "frames", enum_val: { int_value: [96, 120] } }], commercial_config: { default: { benefit_type: "normal_output", amount: 0 }, format_conf: { unified_edit_input_video: { benefit_type: "normal_video", amount: 0 } }, resolution_price_configs: id === "jimeng-video-seedance-2.0" ? [] : resolutions.map(resolution => ({ resolution, price: { benefit_type: videoBenefit(id, resolution, true), amount: 0 }, no_input_video_price: { benefit_type: videoBenefit(id, resolution, false), amount: 0 } })) } })) });
   assert.deepEqual(payload.query_list[0].resource_type, "aigc");
   assert.deepEqual(payload.query_list[0].resource_id, "generate_video");
@@ -39,6 +40,7 @@ database.prepare("UPDATE jimeng_accounts SET total_credit=100 WHERE id=?").run(a
 const { quoteVideo, videoQuoteInput, freezeVideoQuote } = await import("../src/api/controllers/video-quote.ts");
 const input = { model: "jimeng-video-seedance-2.5", resolution: "720p", duration: 4, hasVideo: false, referenceVideoSeconds: 0 };
 after(() => { Date.now = originalNow; database.close(); });
+
 
 test("official points quote uses output-duration credit strategy; account configuration zero is not free", async () => {
   const before = database.prepare("SELECT name,sql FROM sqlite_master WHERE type='table'").all();
@@ -157,4 +159,20 @@ test("official super quote keeps 13 of 26, different super prices retain ranges 
   clock = Date.parse("2026-10-27T00:00:00+08:00");
   assert.equal((await quoteVideo(auth, { ...input, hasVideo: true, referenceVideoSeconds: 6 })).promotion, undefined);
   assert.ok(calls.every(path => /get_common_config|benefit_metadata|batch_get_user_benefit/.test(path)));
+});
+
+test("a broken account cannot poison healthy quotes or admission; all failures remain unavailable", async () => {
+  mode = "valid"; clock += 70_000;
+  const broken = pool.createAccount({ name: "报价故障夹具_超级", sessionId: "fixture-unavailable" });
+  database.prepare("UPDATE jimeng_accounts SET total_credit=500 WHERE id=?").run(broken.id);
+  const { videoAccountMinimumCredits } = await import("../src/api/controllers/video-quote.ts");
+  const quote = await quoteVideo(auth, input);
+  assert.equal(quote.status, "available");
+  const minima = await videoAccountMinimumCredits({ ...input, references: [] } as any);
+  assert.ok(minima.has(account.id)); assert.equal(minima.has(broken.id), false);
+  mode = "all-unavailable"; clock += 70_000;
+  assert.equal((await quoteVideo(auth, input)).status, "unavailable");
+  await assert.rejects(videoAccountMinimumCredits({ ...input, references: [] } as any), /读取失败/);
+  mode = "valid"; clock += 11_000;
+  assert.equal((await quoteVideo(auth, input)).status, "available");
 });

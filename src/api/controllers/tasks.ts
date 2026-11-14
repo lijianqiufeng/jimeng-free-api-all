@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { jimengCreditFloor, spendableJimengCredits } from "@/lib/credit-floor.ts";
 import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import { database, validateApiKey } from "@/lib/database.ts";
@@ -40,32 +41,8 @@ database.transaction(() => {
 }).immediate();
 database.exec("CREATE INDEX IF NOT EXISTS idx_canvas_video_hold ON canvas_tasks(kind, provider_hold, account_id)");
 const polling = new Map<string, Promise<void>>();
-const resultRefreshing = new Map<string, Promise<boolean>>();
 const videoDispatches = new Map<string, { controller: AbortController; done: Promise<void> }>();
 const get = (id: string) => database.prepare("SELECT * FROM canvas_tasks WHERE id = ?").get(id) as Task | undefined;
-
-function readTaskResult(response: any, task: Task) {
-  const longQuote = isLongVideo(task.model) && task.quote_json ? JSON.parse(task.quote_json) : undefined;
-  return taskResult(response, task.history_id, task.kind, isLongVideo(task.model) ? { model: task.model, submitId: longQuote?.mode === "long" && longQuote.taskId === task.id && longQuote.accountId === task.account_id ? longQuote.submitId : undefined } : undefined);
-}
-
-/** Refresh only the signed media URL of a successful video through its original account/history. */
-async function refreshSucceededVideoResult(task: Task) {
-  if (resultRefreshing.has(task.id)) return resultRefreshing.get(task.id)!;
-  const work = (async () => {
-    try {
-      const response = await request("post", "/mweb/v1/get_history_by_ids", readAccountSessionById(task.account_id), { timeout: 15_000, data: { history_ids: [task.history_id] } });
-      const result = readTaskResult(response, task);
-      if (result.status !== "succeeded") return false;
-      const media = JSON.stringify(result.urls.map((url) => ({ url })));
-      return database.prepare("UPDATE canvas_tasks SET result=?, checked_at=? WHERE id=? AND owner=? AND kind='video' AND status='succeeded' AND account_id=? AND history_id=?").run(media, Date.now(), task.id, task.owner, task.account_id, task.history_id).changes === 1;
-    } catch {
-      return false;
-    }
-  })().finally(() => resultRefreshing.delete(task.id));
-  resultRefreshing.set(task.id, work);
-  return work;
-}
 function sourceForUpgrade(id: string, owner: number) {
   const task = get(id);
   if (!task || task.owner !== owner || task.kind !== "video" || task.model !== "jimeng-video-seedance-2.5-draft" || task.source_task_id || task.status !== "succeeded" || task.provider_hold || !task.history_id || !task.account_id || !task.sample_snapshot_json || !task.quote_json) throw Error("原样片缺少完整来源或尚未成功，未提交高清生成");
@@ -83,6 +60,14 @@ function draftUpgradeState(task: Task) {
 function videoBillingState(task: Task) {
   return task.billing_json ? { billing: JSON.parse(task.billing_json), creditsUsed: JSON.parse(task.billing_json).amount } : task.kind === "video" && task.status === "succeeded" ? { billingPending: true } : {};
 }
+function imagePayment(task: Task) {
+  const payment = task.kind === "image" && task.quote_json ? JSON.parse(task.quote_json) : null;
+  return payment?.policy === "image-payment-v1" ? { ...payment, historyId: task.history_id } : undefined;
+}
+function imagePaymentState(task: Task) {
+  const payment = imagePayment(task);
+  return payment ? { accountId: task.account_id, imagePayment: payment, ...(task.status === "succeeded" && !task.billing_json ? payment.mode === "free" ? { creditsUsed: 0 } : { billingPending: true } : {}) } : {};
+}
 function videoQueueReason(task: Task) {
   const accounts = accountPool.list().filter(account => account.enabled && accountSupportsModel(account.name, task.model, true) && (!task.requested_account_id || account.id === task.requested_account_id));
   if (!accounts.length) return "等待可用超级账号，本视频尚未提交即梦";
@@ -93,18 +78,10 @@ function videoQueueReason(task: Task) {
   }
   return "等待账号余额、官方报价或提交名额确认，本视频尚未提交即梦";
 }
-function publicVideoQuote(task: Task) {
-  const quote = JSON.parse(task.quote_json || "null");
-  if (!quote || typeof quote !== "object" || Array.isArray(quote)) return quote;
-  // submitId is part of the service-to-service long-video billing contract.
-  // Keep account labels, draft internals and retained raw evidence private.
-  for (const key of ["accountName", "accountTier", "draftId", "submissionReceipt", "submissionReconciliation"]) delete quote[key];
-  return quote;
-}
 const publicTask = (task: Task) => {
   const queueReason = task.kind === "video" && task.status === "queued" ? videoQueueReason(task) : undefined;
   const error = videoSubmissionReconciled(task) ? "已人工确认官网无对应记录并解除提交占槽；原任务与积分预留仍待核对，未重新生成" : task.error || queueReason;
-  return { id: task.id, status: task.kind === "video" && task.provider_hold && task.status === "failed" ? "uncertain" : ["submitting", "preparing"].includes(task.status) ? "running" : task.status, model: task.model, ...(task.result && task.status !== "canceled" ? { data: JSON.parse(task.result).map((item: any) => ({ ...item, ...(task.model === "jimeng-video-seedance-2.5-draft" ? { jimengMode: task.source_task_id ? "final" : "draft" } : {}) })) } : {}), ...draftUpgradeState(task), ...videoBillingState(task), ...(error ? { error } : {}), ...(queueReason ? { queueReason } : {}), ...(task.kind === "video" ? { accountId: task.account_id || null, ...(task.paid_started_at > 0 && task.quote_json ? { quote: publicVideoQuote(task) } : {}), creditBefore: task.credit_before, deadlineAt: task.deadline, providerStatus: task.provider_status || task.status, providerHold: Boolean(task.provider_hold) } : task.status === "canceled" && !task.fingerprint && !task.account_id ? { providerHold: false, providerStatus: "canceled" } : {}) };
+  return { id: task.id, ...imagePaymentState(task), status: task.kind === "video" && task.provider_hold && task.status === "failed" ? "uncertain" : ["submitting", "preparing"].includes(task.status) ? "running" : task.status, model: task.model, ...(task.result && task.status !== "canceled" ? { data: JSON.parse(task.result).map((item: any) => ({ ...item, ...(task.model === "jimeng-video-seedance-2.5-draft" ? { jimengMode: task.source_task_id ? "final" : "draft" } : {}) })) } : {}), ...draftUpgradeState(task), ...videoBillingState(task), ...(error ? { error } : {}), ...(queueReason ? { queueReason } : {}), ...(task.kind === "video" ? { accountId: task.account_id || null, ...(task.paid_started_at > 0 && task.quote_json ? { quote: JSON.parse(task.quote_json) } : {}), creditBefore: task.credit_before, deadlineAt: task.deadline, providerStatus: task.provider_status || task.status, providerHold: Boolean(task.provider_hold) } : task.status === "canceled" && !task.fingerprint && !task.account_id ? { providerHold: false, providerStatus: "canceled" } : {}) };
 };
 const videoQueueRoot = path.join(path.dirname(process.env.DB_PATH || "./data/jimeng.db"), "private", "video-queue");
 const payloadPath = (task: Pick<Task, "owner" | "id" | "fingerprint">) => path.join(videoQueueRoot, `${crypto.createHash("sha256").update(`${task.owner}:${task.id}:${task.fingerprint}`).digest("hex")}.json.enc`);
@@ -214,7 +191,7 @@ async function dispatchVideo(task: Task, token: string, signal: AbortSignal) {
         // Conservatively retain other frozen reservations until their original tasks finish.
         const held = database.prepare("SELECT id,account_id,quote_json FROM canvas_tasks WHERE kind='video' AND provider_hold=1 AND account_id=? AND id!=?").all(task.account_id, task.id) as Array<Pick<Task, "id" | "account_id" | "quote_json">>;
         const reserved = held.reduce((sum, item) => sum + videoReservedCredits(item), 0);
-        const available = Math.max(0, account.status.totalCredit! - reserved);
+        const available = spendableJimengCredits(account.id, account.status.totalCredit, reserved) ?? 0;
         if (available < Math.max(5, quote.estimatedCredits)) throw Error(`当前账号可用积分 ${available}，本次视频报价 ${quote.estimatedCredits}，积分不足，未提交生成`);
         if (!database.prepare("UPDATE canvas_tasks SET quote_json=?, credit_before=? WHERE id=? AND status='preparing' AND paid_started_at=0 AND account_id=?").run(snapshot, account.status.totalCredit, task.id, task.account_id).changes) throw Error("原账号报价保存失败，未提交生成");
       }).immediate();
@@ -222,6 +199,12 @@ async function dispatchVideo(task: Task, token: string, signal: AbortSignal) {
       beforeSubmit();
       const quote = JSON.parse(get(task.id)?.quote_json || "null");
       if (!quote || typeof quote.submitId !== "string" || !quote.submitId || typeof quote.draftId !== "string" || !quote.draftId) throw Error("官方报价或原提交身份未保存，未提交生成");
+      if (jimengCreditFloor(task.account_id)) {
+        const account = accountPool.get(task.account_id);
+        const held = database.prepare("SELECT id,account_id,quote_json FROM canvas_tasks WHERE kind='video' AND provider_hold=1 AND account_id=? AND id!=?").all(task.account_id, task.id) as Array<Pick<Task, "id" | "account_id" | "quote_json">>;
+        const reserved = held.reduce((sum, item) => sum + videoReservedCredits(item), 0);
+        if (!account.enabled || account.status.error || !(Date.now() - Date.parse(account.status.checkedAt || "") < 10_000) || !Number.isSafeInteger(quote.estimatedCredits) || quote.estimatedCredits <= 0 || (spendableJimengCredits(account.id, account.status.totalCredit, reserved) ?? 0) < Math.max(5, quote.estimatedCredits)) throw Error("当前账号保留积分保护或可用余额不足，未提交生成");
+      }
       if (!database.prepare("UPDATE canvas_tasks SET status='submitting', provider_status='submitting', paid_started_at=? WHERE id=? AND status='preparing'").run(Date.now(), task.id).changes) throw Error("任务已取消，未提交生成");
       paid = true;
     }, onSubmitted: historyId => {
@@ -249,8 +232,8 @@ async function dispatchVideo(task: Task, token: string, signal: AbortSignal) {
     const cooldown = accountFailureCooldown(error);
     if (task.account_id && cooldown !== null) markFailure(task.account_id, cooldown);
     const preparation = /^(?:当前账号|原账号).*(?:报价|积分余额|暂停新视频提交|超长视频).*未提交生成/.test(message) || /^原样片[^\r\n]{0,120}(?:未提交高清(?:生成|正片)|未更换账号或提交生成)$/.test(message) ? message : error instanceof UploadError ? error.message : message === "任务已取消或超时" ? "即梦视频准备已取消或超时，尚未提交生成" : "即梦视频素材准备失败，尚未提交生成；请检查参考素材后重试";
-    const rejectionLabel = receipt && [1006, 5000].includes(receipt.code) ? "即梦账号积分不足，上游已拒绝本次视频生成" : receipt && [4013, 1015, 1019].includes(receipt.code) ? "即梦安全风控已拒绝本次请求，请检查账号" : "即梦上游已明确拒绝本次视频提交";
-    const reason = hold ? "即梦提交结果未确认；账号保持占用，未自动重提，请检查即梦生成记录" : rejected ? `${rejectionLabel}（${receipt!.code}）；未自动重提` : preparation;
+    const rejectionLabel = receipt && [1006, 5000].includes(receipt.code) ? "即梦账号积分不足以生成本次视频" : receipt && [4013, 1015, 1019].includes(receipt.code) ? "即梦安全风控拒绝本次请求，请检查账号" : "即梦明确拒绝本次视频提交";
+    const reason = hold ? "即梦提交结果未确认；账号保持占用，未自动重提，请检查即梦生成记录" : rejected ? `${rejectionLabel}（${receipt!.code}）：${receipt!.message}；未自动重提` : preparation;
     const saved = database.prepare("UPDATE canvas_tasks SET status=CASE WHEN status='canceled' THEN status ELSE ? END, provider_status=?, provider_hold=?, credential=CASE WHEN ?=1 THEN credential ELSE '' END, error=CASE WHEN status='canceled' THEN error ELSE ? END, quote_json=CASE WHEN json_valid(quote_json) THEN json_set(quote_json,'$.submissionReceipt',json(?)) ELSE quote_json END WHERE id=? AND account_id=? AND history_id='' AND result='' AND status!='succeeded' AND paid_started_at=? AND provider_hold=? AND quote_json IS ?").run(hold ? "uncertain" : "failed", hold ? "uncertain" : "failed", Number(hold), Number(hold), reason, JSON.stringify(observation), task.id, task.account_id, current.paid_started_at, current.provider_hold, current.quote_json);
     if (!saved.changes) { logger.warn(`视频原任务状态已变化，保留提交输入 ${task.id}`); return; }
     await clearPayload(task);
@@ -280,6 +263,11 @@ export function runVideoQueueTick(): Promise<void> {
         continue;
       }
       if (input.kind !== "video") continue;
+      const accounts = accountPool.list().filter(account => account.enabled && accountSupportsModel(account.name, task.model, true) && (!account.cooldownUntil || Date.parse(account.cooldownUntil) <= Date.now()) && (!task.requested_account_id || account.id === task.requested_account_id));
+      if (accounts.length && accounts.every(account => !account.status.error && Date.now() - Date.parse(account.status.checkedAt || "") < 10_000 && Number.isFinite(account.status.totalCredit) && (spendableJimengCredits(account.id, account.status.totalCredit) ?? 0) < 5)) {
+        if (database.prepare("UPDATE canvas_tasks SET status='failed', provider_status='failed', error=? WHERE id=? AND status='queued'").run("即梦候选账号已确认低于最低 5 积分，未提交生成；原任务与预留保持", task.id).changes) await clearPayload(task);
+        continue;
+      }
       let minimumCredits: Map<string, number>;
       try {
         if ("sourceTaskId" in input) {
@@ -292,20 +280,29 @@ export function runVideoQueueTick(): Promise<void> {
       catch (error) {
         if ("sourceTaskId" in input && /^原样片/.test(String(error?.message || ""))) {
           if (database.prepare("UPDATE canvas_tasks SET status='failed', provider_status='failed', error=? WHERE id=? AND status='queued'").run(String(error.message), task.id).changes) await clearPayload(task);
-        }
+        } else database.prepare("UPDATE canvas_tasks SET error=? WHERE id=? AND status='queued'").run("候选账号官方报价暂未确认，等待重查；原任务保留，未提交生成", task.id);
         continue;
       } // An unavailable quote cannot admit a paid request.
-      const accounts = accountPool.list().filter(account => account.enabled && accountSupportsModel(account.name, task.model, true) && (!account.cooldownUntil || Date.parse(account.cooldownUntil) <= Date.now()) && (!task.requested_account_id || account.id === task.requested_account_id));
+      const usage = videoAccountUsage();
       // Busy but sufficiently funded accounts stay in the queue; only confirmed shortages fail.
-      if (accounts.length && accounts.every(account => !account.status.error && Date.now() - Date.parse(account.status.checkedAt || "") < 10_000 && Number.isFinite(account.status.totalCredit) && minimumCredits.has(account.id) && account.status.totalCredit! < Math.max(5, minimumCredits.get(account.id)!))) {
-        const available = Math.max(...accounts.map(account => account.status.totalCredit!)), required = Math.min(...accounts.map(account => minimumCredits.get(account.id)!));
-        const reason = `即梦账号积分不足：最高余额 ${available}，本次视频报价至少 ${required}；未提交生成，请补充积分后重试`;
+      if (accounts.length && accounts.every(account => {
+        if (account.status.error || !(Date.now() - Date.parse(account.status.checkedAt || "") < 10_000) || !Number.isFinite(account.status.totalCredit) || !minimumCredits.has(account.id)) return false;
+        const held = usage.get(account.id), required = Math.max(5, minimumCredits.get(account.id)!);
+        return (spendableJimengCredits(account.id, account.status.totalCredit) ?? 0) < required || !held?.active && !held?.rendering && !held?.billingPending && (spendableJimengCredits(account.id, account.status.totalCredit, held?.reservedCredits || 0) ?? 0) < required;
+      })) {
+        const available = Math.max(...accounts.map(account => spendableJimengCredits(account.id, account.status.totalCredit) ?? 0)), required = Math.min(...accounts.map(account => minimumCredits.get(account.id)!));
+        const reserved = accounts.some(account => (usage.get(account.id)?.reservedCredits || 0) > 0);
+        const reason = reserved ? "即梦账号扣除原任务保留预留后可用积分不足；原任务与预留保持，未提交本次生成，请核对原任务或补充积分后重试" : `即梦账号积分不足：最高余额 ${available}，本次视频报价至少 ${required}；未提交生成，请补充积分后重试`;
         if (database.prepare("UPDATE canvas_tasks SET status='failed', provider_status='failed', error=? WHERE id=? AND status='queued'").run(reason, task.id).changes) await clearPayload(task);
         continue;
       }
       const settings = readVideoQueueSettings();
       const selected = reserveVideoAccount(task.id, settings.perAccountConcurrency, settings.totalConcurrency ?? Infinity, minimumCredits);
-      if (selected) startVideoDispatch(get(task.id)!, selected.sessionId);
+      if (selected) {
+        database.prepare("UPDATE canvas_tasks SET error='' WHERE id=? AND status='preparing' AND paid_started_at=0").run(task.id);
+        startVideoDispatch(get(task.id)!, selected.sessionId);
+      }
+      else database.prepare("UPDATE canvas_tasks SET error=? WHERE id=? AND status='queued'").run(accounts.some(account => !minimumCredits.has(account.id)) ? "部分候选账号官方报价未确认，等待可用账号；原任务保留，未提交生成" : "", task.id);
     }
   })().finally(() => { videoTick = undefined; });
   return videoTick;
@@ -322,7 +319,7 @@ export async function createTask(owner: number, authorization: string, body: unk
     return { status: 200, body: publicTask(previous) };
   }
   if (input.kind === "video") return enqueueVideo(owner, authorization, input, fingerprint, requestedAccountId);
-  const credential = await resolveAuthorization(authorization, requestedAccountId, input.model, true);
+  const credential = await resolveAuthorization(authorization, requestedAccountId, input.model, true, false, input.resolution);
   // resolveAuthorization yields: recheck for concurrent requests before inserting.
   const reserved = database.prepare("INSERT OR IGNORE INTO canvas_tasks (id, owner, kind, model, fingerprint, status, credential, account_id, deadline) VALUES (?, ?, ?, ?, ?, 'submitting', ?, ?, ?)").run(input.id, owner, input.kind, input.model, fingerprint, encrypt(credential.token), credential.accountId || "", Date.now() + 60 * 60_000);
   if (!reserved.changes) return createTask(owner, authorization, body, requestedAccountId);
@@ -330,7 +327,11 @@ export async function createTask(owner: number, authorization: string, body: unk
     database.prepare("UPDATE canvas_tasks SET history_id = ?, status = 'running', error = '' WHERE id = ? AND status IN ('submitting', 'uncertain') AND history_id=''").run(historyId, input.id);
   };
   const beforeSubmit = () => { const current = get(input.id); if (current?.status !== "submitting" || Date.now() >= current.deadline) throw Error("任务已取消或超时"); };
-  const work = generateImages(input.model, input.prompt, { ratio: input.ratio, resolution: input.resolution, filePaths: input.images, n: 1, onSubmitted, beforeSubmit }, credential.token);
+  const onPaymentPrepared = (payment: { mode: "free" | "credits"; submitId: string }) => {
+    const snapshot = { ...payment, policy: "image-payment-v1", taskId: input.id, accountId: credential.accountId, model: input.model, resolution: input.resolution };
+    if (!database.prepare("UPDATE canvas_tasks SET quote_json=? WHERE id=? AND status='submitting' AND history_id='' AND quote_json IS NULL").run(JSON.stringify(snapshot), input.id).changes) throw Error("当前账号图片任务已取消或提交状态已变化，未提交生成");
+  };
+  const work = generateImages(input.model, input.prompt, { ratio: input.ratio, resolution: input.resolution, filePaths: input.images, n: 1, onSubmitted, beforeSubmit, onPaymentPrepared }, credential.token);
   void work.catch((error) => {
     // Never return raw upstream errors, request configs, cookies or asset URLs.
     const message = String(error?.message || "");
@@ -338,21 +339,17 @@ export async function createTask(owner: number, authorization: string, body: unk
     if (credential.accountId && cooldownMs !== null) markFailure(credential.accountId, cooldownMs);
     const known = /\(错误码: 4013\)$/.test(message)
       ? "即梦安全风控拒绝了本次请求（4013：疑似存在异常行为）；未自动重提，请前往即梦网页检查账号安全验证或联系即梦支持"
-      : message.match(/当前即梦模型不支持所选(?:清晰度|时长)，未自动(?:降级|缩短)|^首帧上传失败$|^尾帧上传失败，未提交生成$|^第 \d+ 张参考图上传失败，未提交生成$|^(?:当前账号|当前视频|参考(?:图|视频|音频|音视频))[^\r\n]{0,100}，未提交生成$/)?.[0];
+      : message.match(/当前即梦模型不支持所选(?:清晰度|时长)，未自动(?:降级|缩短)|^首帧上传失败$|^尾帧上传失败，未提交生成$|^(?:当前账号|当前视频|第 \d+ 张参考图|参考(?:图|视频|音频|音视频))[^\r\n]{0,100}，未提交生成$/)?.[0];
     const rejected = Boolean(known) || /^HTTP (?:400|401|402|403|404|405|413|415|422|429)\b/.test(message) || Number.isInteger(error?.upstreamCode) && error.upstreamCode > 0;
     database.prepare("UPDATE canvas_tasks SET status = ?, credential = CASE WHEN ?=1 THEN '' ELSE credential END, error = ? WHERE id = ? AND status IN ('submitting', 'uncertain') AND history_id=''").run(rejected ? "failed" : "uncertain", Number(rejected), known || (rejected ? "即梦已拒绝本次提交；未自动重提，请检查账号积分、权限和即梦生成记录" : "即梦提交回执未确认；保留原账号与凭据，未自动重提，请检查即梦生成记录"), input.id);
   });
   return { status: 202, body: publicTask(get(input.id)!) };
 }
 
-export async function queryTask(owner: number, id: string, refreshResult = false) {
+export async function queryTask(owner: number, id: string) {
   let task = get(id);
   if (!task || task.owner !== owner) return { status: 404, body: { error: "任务不存在" } };
-  if (refreshResult && task.kind === "video" && task.status === "succeeded" && task.history_id && task.account_id) {
-    if (!await refreshSucceededVideoResult(task)) return { status: 503, body: { id: task.id, status: task.status, providerStatus: task.provider_status, error: "原视频结果地址暂时无法刷新，请稍后重试" } };
-    task = get(id)!;
-  }
-  if ((task.kind === "video" ? task.provider_hold && task.history_id && task.credential : task.status === "running" && task.history_id && task.credential) && Date.now() - task.checked_at >= 5000) {
+  if ((task.kind === "video" ? task.provider_hold && task.history_id && task.credential : (task.status === "running" || task.status === "succeeded" && imagePayment(task)?.mode === "credits" && !task.billing_json) && task.history_id && task.credential) && Date.now() - task.checked_at >= 5000) {
     if (!polling.has(id)) {
       const current = task;
       database.prepare("UPDATE canvas_tasks SET checked_at = ? WHERE id = ?").run(Date.now(), id);
@@ -360,20 +357,31 @@ export async function queryTask(owner: number, id: string, refreshResult = false
         const response = await request("post", "/mweb/v1/get_history_by_ids", decrypt(current.credential), { timeout: 15_000, data: { history_ids: [current.history_id], ...(current.kind === "image" ? { image_info: { width: 4096, height: 4096, format: "webp" } } : {}) } });
         const sample = current.model === "jimeng-video-seedance-2.5-draft" && !current.source_task_id;
         if (sample && Number(taskHistory(response, current.history_id)?.status) === 21) return;
-        const result = readTaskResult(response, current);
+        const longQuote = isLongVideo(current.model) && current.quote_json ? JSON.parse(current.quote_json) : undefined;
+        const result = taskResult(response, current.history_id, current.kind, isLongVideo(current.model) ? { model: current.model, submitId: longQuote?.mode === "long" && longQuote.taskId === current.id && longQuote.accountId === current.account_id ? longQuote.submitId : undefined } : undefined);
         if (result.status === "running") return;
+        if (current.kind === "image" && current.status === "succeeded" && result.status !== "succeeded") return;
         if (result.status === "failed" && current.account_id) {
           const cooldownMs = accountFailureCooldown(result.error);
           if (cooldownMs !== null) markFailure(current.account_id, cooldownMs);
         }
         let billing;
         if (current.kind === "video" && result.status === "succeeded") try { billing = await readVideoBilling(decrypt(current.credential), current, taskHistory(response, current.history_id)); } catch { /* Keep the successful MP4 and original credential until its exact bill is confirmed. */ }
+        const payment = imagePayment(current), history = taskHistory(response, current.history_id);
+        const paidImage = payment?.mode === "credits";
+        if (paidImage && result.status === "succeeded" && history?.submit_id === payment.submitId) try {
+          billing = await readVideoBilling(decrypt(current.credential), current, history);
+        } catch { /* Retain the original image and credential; only query its original bill later. */ }
+        if (current.kind === "image" && current.status === "succeeded") {
+          if (billing) database.prepare("UPDATE canvas_tasks SET billing_json=?,credential='' WHERE id=? AND status='succeeded' AND account_id=? AND history_id=? AND billing_json IS NULL").run(JSON.stringify(billing), current.id, current.account_id, current.history_id);
+          return;
+        }
         const hold = current.kind === "video" && result.status === "succeeded" && !billing;
         let sampleSnapshot: string | null = null;
         if (sample && result.status === "succeeded") try { sampleSnapshot = encrypt(JSON.stringify(readDraftSource(response, current.history_id))); } catch { /* Keep a successful video without granting an unverified finalization. */ }
         const updated = current.kind === "video"
           ? database.prepare("UPDATE canvas_tasks SET status=CASE WHEN status='canceled' THEN status ELSE ? END, provider_status=?, result=?, error=CASE WHEN status='canceled' THEN error ELSE ? END, sample_snapshot_json=COALESCE(sample_snapshot_json,?), billing_json=COALESCE(billing_json,?), credential=CASE WHEN ?=1 THEN credential ELSE '' END, provider_hold=? WHERE id=? AND provider_hold=1 AND history_id=? AND account_id=?").run(result.status, result.status, result.status === "succeeded" ? JSON.stringify(result.urls.map((url) => ({ url }))) : "", result.status === "failed" ? result.error : "", sampleSnapshot, billing ? JSON.stringify(billing) : null, Number(hold), Number(hold), id, current.history_id, current.account_id)
-          : database.prepare("UPDATE canvas_tasks SET status = ?, result = ?, error = ?, credential = '' WHERE id = ? AND status = 'running'").run(result.status, result.status === "succeeded" ? JSON.stringify(result.urls.map((url) => ({ url }))) : "", result.status === "failed" ? result.error : "", id);
+          : database.prepare("UPDATE canvas_tasks SET status=?,result=?,error=?,billing_json=?,credential=CASE WHEN ?=1 THEN credential ELSE '' END WHERE id=? AND status='running'").run(result.status, result.status === "succeeded" ? JSON.stringify(result.urls.map((url) => ({ url }))) : "", result.status === "failed" ? result.error : "", billing ? JSON.stringify(billing) : null, Number(paidImage && result.status === "succeeded" && !billing), id);
         if (updated.changes && result.status === "succeeded" && current.status !== "succeeded" && current.account_id) markSuccess(current.account_id);
       })().catch((error) => {
         const cooldownMs = accountFailureCooldown(error);

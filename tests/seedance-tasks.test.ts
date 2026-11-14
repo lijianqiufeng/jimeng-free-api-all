@@ -24,11 +24,7 @@ test("risk diagnostics preserve only the explicit reason and safe upstream trace
   assert.throws(() => checkResult(response({ ret: "4013", errmsg: "risk rejected", fail_starling_key: "https://private.test/token", logid: "cookie=secret" })), (error: any) => error.upstreamCode === 4013 && !error.riskReason && !error.upstreamLogId);
 });
 const vodStages: string[] = [];
-childProcess.execFile = ((_file: string, _args: string[], _options: unknown, callback: Function) => {
-  callback(null, JSON.stringify({ format: { duration: referenceDuration }, streams: [{ codec_type: "video", width: 1280, height: 720, avg_frame_rate: "24/1" }, { codec_type: "audio" }] }));
-  const child = { once(event: string, handler: Function) { if (event === "close") queueMicrotask(() => handler(0)); return child; } };
-  return child;
-}) as any;
+childProcess.execFile = ((_file: string, _args: string[], _options: unknown, callback: Function) => callback(null, JSON.stringify({ format: { duration: referenceDuration }, streams: [{ codec_type: "video", width: 1280, height: 720, avg_frame_rate: "24/1" }, { codec_type: "audio" }] }))) as any;
 globalThis.fetch = async url => {
   assert.match(String(url), /^https:\/\/fixture\.tos-cn-beijing\.volces\.com\//);
   if (fetchFails) throw Error("mock reference outage");
@@ -255,3 +251,4 @@ test("cancel before POST cannot dispatch; insufficient credit, ambiguous errors 
   }
   fail = "";
 });
+

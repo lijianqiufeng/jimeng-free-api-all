@@ -16,7 +16,3 @@ data/
 *.db-wal
 *.sqlite
 *.sqlite3
-
-# Local Windows portable build output
-portable-release/
-outputs/

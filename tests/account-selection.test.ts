@@ -5,6 +5,7 @@ import axios from "axios";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { premiumImageBenefits, premiumImageConfig } from "./fixtures/premium-images.ts";
 
 const directory = mkdtempSync(join(tmpdir(), "jimeng-account-test-"));
 process.env.DB_PATH = join(directory, "accounts.sqlite");
@@ -16,6 +17,8 @@ const { getStaticModelConfigs } = await import("../src/api/controllers/models.ts
 const db = new Database(process.env.DB_PATH);
 pool.setMembershipStatusProvider(undefined);
 axios.defaults.adapter = async (config) => {
+  const url = String(config.url);
+  if (url.endsWith("/get_common_config") || url.endsWith("/batch_get_user_benefit")) return { data: { ret: "0", data: url.endsWith("/get_common_config") ? premiumImageConfig : premiumImageBenefits() }, status: 200, statusText: "OK", headers: {}, config };
   const text = String(config.headers?.Cookie || "");
   const credit = text.includes("video-rich") ? 14686 : text.includes("video-poor") ? 78 : text.includes("test-session-low") ? 2 : text.includes("test-session-high") ? 28 : 0;
   if (!String(config.url).includes("/commerce/v1/benefits/user_credit")) throw Error("Unmocked network");
@@ -81,7 +84,7 @@ test("one managed API key can rotate through four accounts and credits expose th
   assert.ok(!JSON.stringify(result).includes("credential"));
 });
 
-test("advanced suffix preserves premium images and upscale while blocking new video", async () => {
+test("advanced accounts join paid image rotation and keep free images while blocking new video", async () => {
   for (const account of pool.listAccounts()) pool.setAccountEnabled(account.id, false);
   const advanced = pool.createAccount({ name: "视频专用_高级", sessionId: "test-session-high-advanced" });
   const regular = pool.createAccount({ name: "普通图片号", sessionId: "test-session-high-regular" });
@@ -89,18 +92,17 @@ test("advanced suffix preserves premium images and upscale while blocking new vi
   const { key } = createApiKey("advanced-policy-test");
   pool.grantAccountLease(validateApiKey(key).apiKeyId!, advanced.id);
   for (const model of ["jimeng-image-5.0-pro", "high_aes_general_v50p_large"]) {
-    for (let i = 0; i < 12; i++) assert.equal(pool.selectAccount("round_robin", model).account.id, regular.id);
-    assert.equal((await resolveAuthorization(`Bearer ${key}`, undefined, model)).accountId, regular.id);
-    await assert.rejects(resolveAuthorization(`Bearer ${key}`, advanced.id, model, true), /_高级/);
+    assert.deepEqual(new Set(Array.from({ length: 12 }, () => pool.selectAccount("round_robin", model).account.id)), new Set([advanced.id, regular.id]));
+    assert.equal((await resolveAuthorization(`Bearer ${key}`, advanced.id, model, true)).accountId, advanced.id);
   }
   assert.equal(pool.selectAccountById(advanced.id).account.id, advanced.id); // Existing task/status lookups are unaffected.
   for (const model of ["jimeng-image-5.0-lite", "jimeng-8k", "jimeng-image-4.7"]) assert.equal((await resolveAuthorization(`Bearer ${key}`, advanced.id, model, true)).accountId, advanced.id);
   await assert.rejects(resolveAuthorization(`Bearer ${key}`, advanced.id, "jimeng-video-seedance-2.0", true), /高级账号已暂停新视频提交/);
   assert.equal(pool.getAccount(advanced.id).enabled, true, "video policy does not disable the account for images");
   pool.updateAccount(regular.id, { name: "新加入_高级" });
-  assert.throws(() => pool.selectAccount("round_robin", "jimeng-image-5.0-pro"), /普通账号/);
+  assert.deepEqual(new Set(Array.from({ length: 8 }, () => pool.selectAccount("round_robin", "jimeng-image-5.0-pro").account.id)), new Set([advanced.id, regular.id]));
   pool.updateAccount(advanced.id, { name: "恢复普通号" });
-  assert.equal(pool.selectAccount("round_robin", "jimeng-image-5.0-pro").account.id, advanced.id);
+  assert.equal(pool.selectAccountById(advanced.id, "jimeng-image-5.0-pro").account.id, advanced.id);
   assert.equal(pool.accountSupportsModel("高级_普通", "jimeng-image-5.0-pro"), true);
 });
 
@@ -184,8 +186,8 @@ test("super and advanced share image pools but only super can submit videos", as
   }
   for (const model of ["jimeng-4k", "jimeng-8k", "jimeng-image-4.7"]) for (const account of premium) assert.equal(pool.accountSupportsModel(account.name, model), true);
   for (const model of ["jimeng-image-5.0-pro", "high_aes_general_v50p_large"]) {
-    assert.equal(pool.selectAccount("round_robin", model).account.id, regular.id);
-    for (const account of premium) await assert.rejects(resolveAuthorization(authorization, account.id, model, true), /_高级 或 _超级.*不用于 5.0 Pro/);
+    assert.deepEqual(new Set(Array.from({ length: 12 }, () => pool.selectAccount("round_robin", model).account.id)), new Set([...premium, regular].map(account => account.id)));
+    for (const account of premium) assert.equal((await resolveAuthorization(authorization, account.id, model, true)).accountId, account.id);
   }
   assert.equal(pool.selectAccountById(premium[1].id).account.id, premium[1].id);
   pool.updateAccount(premium[1].id, { sessionId: "test-session-low-super" });

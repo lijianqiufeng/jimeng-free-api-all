@@ -5,6 +5,8 @@ import path from "path";
 
 import { getCredit, request, videoRequestSignal } from "@/api/controllers/core.ts";
 
+import { jimengCreditFloor, spendableJimengCredits } from "./credit-floor.ts";
+
 const DB_PATH = process.env.DB_PATH || "./data/jimeng.db";
 const TABLE = "jimeng_accounts";
 
@@ -28,12 +30,12 @@ export function accountTier(name: string): "standard" | "advanced" | "super" {
 /** New video submissions only; original task queries keep their saved account. */
 export const isVideoSubmissionAccount = (name: string) => accountTier(name) === "super";
 export function accountModelError(model: string, video = isVideoModel(model)): string {
-  return video ? "视频生成仅使用名称以 _超级 结尾的账号；高级账号已暂停新视频提交，本次未提交生成" : isPremiumFreeImageModel(model) ? "Lite 和 4.6 免费高速生成仅使用名称以 _高级 或 _超级 结尾的账号；本次未提交生成" : "名称以 _高级 或 _超级 结尾的账号不用于 5.0 Pro；本次未提交生成";
+  return video ? "视频生成仅使用名称以 _超级 结尾的账号；高级账号已暂停新视频提交，本次未提交生成" : "Lite 和 4.6 免费高速生成仅使用名称以 _高级 或 _超级 结尾的账号；本次未提交生成";
 }
 export function accountSupportsModel(name: string, model: string, video = isVideoModel(model)): boolean {
   if (video) return isVideoSubmissionAccount(name);
   const premium = accountTier(name) !== "standard";
-  return isPremiumFreeImageModel(model) ? premium : !premium || !["jimeng-image-5.0-pro", "high_aes_general_v50p_large"].includes(model.trim().toLowerCase().split(":")[0]);
+  return !isPremiumFreeImageModel(model) || premium;
 }
 
 export interface AccountPoolCreateInput {
@@ -395,7 +397,7 @@ export function readAccountSessionById(id: string): string {
   return extractSessionId(decrypt(row.credential_ciphertext), row.credential_kind);
 }
 
-export function selectAccount(strategy: AccountSelectionStrategy = "least_failures", model = "", video = isVideoModel(model), videoLimit = Infinity, minimumCredits?: ReadonlyMap<string, number>): AccountSelection {
+export function selectAccount(strategy: AccountSelectionStrategy = "least_failures", model = "", video = isVideoModel(model), videoLimit = Infinity, minimumCredits?: ReadonlyMap<string, number>, eligibleAccountIds?: ReadonlySet<string>): AccountSelection {
   const requireRecentStatus = Number.isFinite(videoLimit);
   if (video) videoLimit = Math.min(videoLimit, VIDEO_ACCOUNT_SUBMISSION_CONCURRENCY);
   const reserve = db.transaction(() => {
@@ -405,17 +407,17 @@ export function selectAccount(strategy: AccountSelectionStrategy = "least_failur
     const paid = requiresPaidCredit(model, video);
     const usage = video ? videoAccountUsage() : new Map<string, { active: number; reservedCredits: number }>();
     const active = (id: string) => usage.get(id)?.active || 0;
-    const available = (row: AccountRow) => Math.max(0, (row.total_credit ?? 0) - (usage.get(row.id)?.reservedCredits || 0));
-    const eligible = rows.filter((row) => accountSupportsModel(row.name, model, video) && (!paid || row.total_credit !== null && available(row) >= Math.max(MIN_PAID_CREDIT, minimumCredits ? minimumCredits.get(row.id) ?? Infinity : 0)) && (!video || active(row.id) < videoLimit) && (!requireRecentStatus || !row.status_error && Date.now() - Date.parse(row.status_checked_at || "") < 10_000));
+    const available = (row: AccountRow) => spendableJimengCredits(row.id, row.total_credit, usage.get(row.id)?.reservedCredits || 0) ?? 0;
+    const eligible = rows.filter((row) => (!eligibleAccountIds || eligibleAccountIds.has(row.id)) && accountSupportsModel(row.name, model, video) && (!paid || video || !jimengCreditFloor(row.id)) && (!paid || row.total_credit !== null && available(row) >= Math.max(MIN_PAID_CREDIT, minimumCredits ? minimumCredits.get(row.id) ?? Infinity : 0)) && (!video || active(row.id) < videoLimit) && (!requireRecentStatus || !row.status_error && Date.now() - Date.parse(row.status_checked_at || "") < 10_000));
     // Five credits is an admission floor, not the price of a VIP video.
     const leastActive = video ? eligible.filter(row => active(row.id) === Math.min(...eligible.map(item => active(item.id)))) : eligible;
     const candidates = video ? leastActive.filter((row) => available(row) === Math.max(...leastActive.map(available)))
       : strategy === "round_robin" || !eligible.length ? eligible : eligible.filter((row) => row.failure_count === Math.min(...eligible.map((item) => item.failure_count)));
-    const equalWeight = !paid || candidates.every((row) => row.total_credit !== null && row.total_credit >= 30);
+    const equalWeight = !paid || candidates.every((row) => row.total_credit !== null && available(row) >= 30);
     const sequence = (db.prepare(`SELECT COALESCE(MAX(selection_seq), 0) + 1 AS value FROM ${TABLE}`).get() as { value: number }).value;
-    const weight = (row: AccountRow) => equalWeight ? 1 : 1 + 3 * Math.min(1, Math.max(0, row.total_credit ?? 0) / 30);
+    const weight = (row: AccountRow) => equalWeight ? 1 : 1 + 3 * Math.min(1, available(row) / 30);
     const row = candidates.reduce<AccountRow | undefined>((best, item) => !best || (sequence - item.selection_seq) * weight(item) > (sequence - best.selection_seq) * weight(best) ? item : best, undefined);
-    if (!row) throw new Error(video ? "没有可用于视频生成的 _超级账号；须启用、未冷却且至少 5 积分，未提交生成" : isPremiumFreeImageModel(model) ? "没有可用于 Lite 和 4.6 免费高速生成的 _高级/_超级账号；本次未提交生成" : !accountSupportsModel("_高级", model) ? "没有可用于 5.0 Pro 的普通账号；_高级/_超级账号保留给其他模型，普通账号须至少 5 积分" : paid ? "没有积分达到 5 的即梦账号；低于 5 积分的账号仅用于 Lite" : "没有可用的即梦账号");
+    if (!row) throw new Error(video ? "没有可用于视频生成的 _超级账号；须启用、未冷却且至少 5 积分，未提交生成" : isPremiumFreeImageModel(model) ? "没有可用于 Lite 和 4.6 免费高速生成的 _高级/_超级账号；本次未提交生成" : paid ? "没有积分达到 5 的即梦账号；低于 5 积分的账号仅用于 Lite" : "没有可用的即梦账号");
     db.prepare(`UPDATE ${TABLE} SET selection_seq = ?, last_used_at = ?, updated_at = ? WHERE id = ?`).run(sequence, timestamp, timestamp, row.id);
     return row;
   });
@@ -448,7 +450,7 @@ export function reserveVideoAccount(taskId: string, perAccount: number, total: n
     const accounts = listAccounts().filter(account => accountSupportsModel(account.name, task.model, true));
     // Unknown receipts keep their submission lock; accepted histories render independently.
     if ([...usage.values()].reduce((sum, account) => sum + account.active, 0) >= total) return;
-    const eligible = accounts.filter(account => account.enabled && (!account.cooldownUntil || Date.parse(account.cooldownUntil) <= Date.now()) && !account.status.error && Date.now() - Date.parse(account.status.checkedAt || "") < 10_000 && Math.max(0, (account.status.totalCredit ?? 0) - (usage.get(account.id)?.reservedCredits || 0)) >= Math.max(MIN_PAID_CREDIT, minimumCredits ? minimumCredits.get(account.id) ?? Infinity : 0) && (usage.get(account.id)?.active || 0) < perAccount && (!task.requested_account_id || task.requested_account_id === account.id));
+    const eligible = accounts.filter(account => account.enabled && (!account.cooldownUntil || Date.parse(account.cooldownUntil) <= Date.now()) && !account.status.error && Date.now() - Date.parse(account.status.checkedAt || "") < 10_000 && (spendableJimengCredits(account.id, account.status.totalCredit, usage.get(account.id)?.reservedCredits || 0) ?? 0) >= Math.max(MIN_PAID_CREDIT, minimumCredits ? minimumCredits.get(account.id) ?? Infinity : 0) && (usage.get(account.id)?.active || 0) < perAccount && (!task.requested_account_id || task.requested_account_id === account.id));
     if (!eligible.length) return;
     const selected = task.requested_account_id ? selectAccountById(task.requested_account_id, task.model, true) : selectAccount("round_robin", task.model, true, perAccount, minimumCredits);
     const changed = db.prepare("UPDATE canvas_tasks SET status='preparing', provider_status='preparing', account_id=?, credential=?, credit_before=?, provider_hold=1, deadline=? WHERE id=? AND status='queued'").run(selected.account.id, encrypt(selected.sessionId), selected.account.status.totalCredit, Date.now() + 30 * 60_000, taskId);
