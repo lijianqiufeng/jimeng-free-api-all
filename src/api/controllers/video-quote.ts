@@ -1,4 +1,5 @@
 import accountPool, { accountSupportsModel, accountTier, MIN_PAID_CREDIT, readAccountSessionById } from "@/lib/account-pool.ts";
+import { newAccountAllowed } from "@/lib/account-priority.ts";
 import db from "@/lib/database.ts";
 import { request, tokenSplit } from "./core.ts";
 import { fetchVideoModelConfigs, getStaticModelReqKey } from "./models.ts";
@@ -17,7 +18,7 @@ export function videoQuoteInput(input: any): QuoteInput {
 }
 
 async function readSnapshots() {
-  const accounts = accountPool.list().filter(account => account.enabled && accountSupportsModel(account.name, "", true) && (account.status.totalCredit ?? 0) >= MIN_PAID_CREDIT && (!account.cooldownUntil || Date.parse(account.cooldownUntil) <= Date.now()));
+  const accounts = accountPool.list().filter(account => newAccountAllowed(account.id) && account.enabled && accountSupportsModel(account.name, "", true) && (account.status.totalCredit ?? 0) >= MIN_PAID_CREDIT && (!account.cooldownUntil || Date.parse(account.cooldownUntil) <= Date.now()));
   if (!accounts.length) throw Error("没有可读取视频报价的超级账号");
   const key = JSON.stringify(accounts.map(account => [account.id, account.name]).sort(([left], [right]) => left.localeCompare(right)));
   if (cache?.key === key && cache.expires > Date.now()) return cache.value;

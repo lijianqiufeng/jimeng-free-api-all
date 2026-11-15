@@ -90,6 +90,7 @@ test("video policy requires a managed key and performs no supplier or account op
     accountPolicy: "super-only",
     videoQueuePolicy: "serial-submit-on-accepted-v2",
     longVideoPolicy: "official-long-video-v1",
+    accountPriority: null,
   });
   for (const authorization of ["Bearer fixture1", "Bearer invalid"]) assert.equal((await route.get["/policy"](request(authorization)) as any).statusCode, 401);
   assert.equal(calls.length, beforeCalls);

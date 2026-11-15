@@ -1,5 +1,6 @@
 import _ from "lodash";
 import { jimengCreditFloor, spendableJimengCredits } from "@/lib/credit-floor.ts";
+import { accountPriority, assertNewAccountAllowed, newAccountAllowed } from "@/lib/account-priority.ts";
 import { createHash } from "node:crypto";
 
 import { tokenSplit } from "@/api/controllers/core.ts";
@@ -24,7 +25,7 @@ const freeImageChecks = new Map<string, { expiresAt: number; value: Promise<bool
 async function freeImageAccountIds(model: string, resolution: string, requestedAccountId?: string) {
   const modelId = model.trim().toLowerCase().split(":")[0], size = resolution.toLowerCase();
   if (requestedAccountId && !accountSupportsModel(accountPool.get(requestedAccountId).name, model)) throw Error(accountModelError(model));
-  const candidates = accountPool.list().filter(account => account.enabled && accountSupportsModel(account.name, model) && (!account.cooldownUntil || Date.parse(account.cooldownUntil) <= Date.now()) && (!requestedAccountId || account.id === requestedAccountId));
+  const candidates = accountPool.list().filter(account => newAccountAllowed(account.id, false) && account.enabled && accountSupportsModel(account.name, model) && (!account.cooldownUntil || Date.parse(account.cooldownUntil) <= Date.now()) && (!requestedAccountId || account.id === requestedAccountId));
   for (const [key, entry] of freeImageChecks) if (entry.expiresAt <= Date.now()) freeImageChecks.delete(key);
   const checks = await Promise.allSettled(candidates.map(async account => {
     const token = readAccountSessionById(account.id);
@@ -43,13 +44,15 @@ export function refreshVideoAccountBalances(model: string) {
   if (videoBalanceRefresh) return videoBalanceRefresh;
   if (Date.now() < videoBalanceRefreshAt) return Promise.resolve();
   videoBalanceRefreshAt = Date.now() + 5000;
-  videoBalanceRefresh = Promise.allSettled(accountPool.list().filter(account => account.enabled && accountSupportsModel(account.name, model, true) && (!account.cooldownUntil || Date.parse(account.cooldownUntil) <= Date.now())).map(account => accountPool.refreshStatus(account.id))).then(() => undefined).finally(() => { videoBalanceRefresh = undefined; });
+  videoBalanceRefresh = Promise.allSettled(accountPool.list().filter(account => newAccountAllowed(account.id) && account.enabled && accountSupportsModel(account.name, model, true) && (!account.cooldownUntil || Date.parse(account.cooldownUntil) <= Date.now())).map(account => accountPool.refreshStatus(account.id))).then(() => undefined).finally(() => { videoBalanceRefresh = undefined; });
   return videoBalanceRefresh;
 }
 
 export function publicAccountError(error: unknown): string | undefined {
   const message = error instanceof Error ? error.message : "";
   return [
+    "当前账号已停止接收新任务，未提交生成；原任务账号保持",
+    "账号优先级已启用，新任务必须使用托管 API Key，未提交生成",
     "当前账号有保留积分，此入口缺少可冻结报价，未提交生成；请使用视频创作台或其他账号",
     "没有可用于视频生成的 _超级账号；须启用、未冷却且至少 5 积分，未提交生成",
     "视频生成仅使用名称以 _超级 结尾的账号；高级账号已暂停新视频提交，本次未提交生成",
@@ -79,9 +82,10 @@ export async function resolveAuthorization(authorization: string, requestedAccou
       throw new Error("该 API Key 没有此账号的有效租约绑定");
     }
     const paid = requiresPaidCredit(model, video);
+    if (model && requestedAccountId) assertNewAccountAllowed(requestedAccountId, paid);
     const eligibleIds = !video && isPremiumFreeImageModel(model) ? await freeImageAccountIds(model, resolution, requestedAccountId) : undefined;
     if (!requestedAccountId && paid) {
-      const available = accountPool.list().filter((a) => a.enabled && accountSupportsModel(a.name, model, video) && (!a.cooldownUntil || Date.parse(a.cooldownUntil) <= Date.now()));
+      const available = accountPool.list().filter((a) => newAccountAllowed(a.id) && a.enabled && accountSupportsModel(a.name, model, video) && (!a.cooldownUntil || Date.parse(a.cooldownUntil) <= Date.now()));
       if (video || !available.some((a) => (spendableJimengCredits(a.id, a.status.totalCredit) ?? 0) >= MIN_PAID_CREDIT)) {
         await Promise.allSettled(available.map((a) => accountPool.refreshStatus(a.id)));
       }
@@ -102,6 +106,7 @@ export async function resolveAuthorization(authorization: string, requestedAccou
       }
     }
     if (!requestedAccountId) accountPool.grantLease(apiKeyId, selected.account.id);
+    if (model) assertNewAccountAllowed(selected.account.id, paid);
     touchApiKey(managed.token);
     return {
       token: selected.sessionId,
@@ -115,6 +120,7 @@ export async function resolveAuthorization(authorization: string, requestedAccou
   }
 
   if (video) throw new Error("视频生成必须使用托管 API Key 和名称以 _超级 结尾的账号；本次未提交生成");
+  if (accountPriority && model) throw Error("账号优先级已启用，新任务必须使用托管 API Key，未提交生成");
   if (isPremiumFreeImageModel(model)) throw new Error("Lite 和 4.6 免费高速生成必须使用托管 API Key 和名称以 _高级 或 _超级 结尾的账号；本次未提交生成");
   return { token: _.sample(tokens) as string };
 }

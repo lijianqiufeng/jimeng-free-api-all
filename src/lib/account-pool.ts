@@ -6,6 +6,7 @@ import path from "path";
 import { getCredit, request, videoRequestSignal } from "@/api/controllers/core.ts";
 
 import { jimengCreditFloor, spendableJimengCredits } from "./credit-floor.ts";
+import { newAccountAllowed, preferredNewAccountIds } from "./account-priority.ts";
 
 const DB_PATH = process.env.DB_PATH || "./data/jimeng.db";
 const TABLE = "jimeng_accounts";
@@ -408,7 +409,9 @@ export function selectAccount(strategy: AccountSelectionStrategy = "least_failur
     const usage = video ? videoAccountUsage() : new Map<string, { active: number; reservedCredits: number }>();
     const active = (id: string) => usage.get(id)?.active || 0;
     const available = (row: AccountRow) => spendableJimengCredits(row.id, row.total_credit, usage.get(row.id)?.reservedCredits || 0) ?? 0;
-    const eligible = rows.filter((row) => (!eligibleAccountIds || eligibleAccountIds.has(row.id)) && accountSupportsModel(row.name, model, video) && (!paid || video || !jimengCreditFloor(row.id)) && (!paid || row.total_credit !== null && available(row) >= Math.max(MIN_PAID_CREDIT, minimumCredits ? minimumCredits.get(row.id) ?? Infinity : 0)) && (!video || active(row.id) < videoLimit) && (!requireRecentStatus || !row.status_error && Date.now() - Date.parse(row.status_checked_at || "") < 10_000));
+    const allowed = rows.filter((row) => (!model || newAccountAllowed(row.id, paid)) && (!eligibleAccountIds || eligibleAccountIds.has(row.id)) && accountSupportsModel(row.name, model, video) && (!paid || video || !jimengCreditFloor(row.id)));
+    const priority = model ? preferredNewAccountIds(allowed.map(toPublic), paid, minimumCredits, new Map([...usage].map(([id, item]) => [id, item.reservedCredits]))) : undefined;
+    const eligible = allowed.filter((row) => (!priority || priority.has(row.id)) && (!paid || row.total_credit !== null && available(row) >= Math.max(MIN_PAID_CREDIT, minimumCredits ? minimumCredits.get(row.id) ?? Infinity : 0)) && (!video || active(row.id) < videoLimit) && (!requireRecentStatus || !row.status_error && Date.now() - Date.parse(row.status_checked_at || "") < 10_000));
     // Five credits is an admission floor, not the price of a VIP video.
     const leastActive = video ? eligible.filter(row => active(row.id) === Math.min(...eligible.map(item => active(item.id)))) : eligible;
     const candidates = video ? leastActive.filter((row) => available(row) === Math.max(...leastActive.map(available)))
@@ -447,12 +450,14 @@ export function reserveVideoAccount(taskId: string, perAccount: number, total: n
     const task = db.prepare("SELECT owner, model, requested_account_id FROM canvas_tasks WHERE id=? AND kind='video' AND status='queued'").get(taskId) as { owner: number; model: string; requested_account_id: string } | undefined;
     if (!task || !db.prepare("SELECT 1 FROM api_keys WHERE id=? AND enabled=1").get(task.owner)) return;
     const usage = videoAccountUsage();
-    const accounts = listAccounts().filter(account => accountSupportsModel(account.name, task.model, true));
+    const accounts = listAccounts().filter(account => newAccountAllowed(account.id) && accountSupportsModel(account.name, task.model, true));
     // Unknown receipts keep their submission lock; accepted histories render independently.
     if ([...usage.values()].reduce((sum, account) => sum + account.active, 0) >= total) return;
-    const eligible = accounts.filter(account => account.enabled && (!account.cooldownUntil || Date.parse(account.cooldownUntil) <= Date.now()) && !account.status.error && Date.now() - Date.parse(account.status.checkedAt || "") < 10_000 && (spendableJimengCredits(account.id, account.status.totalCredit, usage.get(account.id)?.reservedCredits || 0) ?? 0) >= Math.max(MIN_PAID_CREDIT, minimumCredits ? minimumCredits.get(account.id) ?? Infinity : 0) && (usage.get(account.id)?.active || 0) < perAccount && (!task.requested_account_id || task.requested_account_id === account.id));
+    const available = accounts.filter(account => account.enabled && (!account.cooldownUntil || Date.parse(account.cooldownUntil) <= Date.now()) && (!task.requested_account_id || task.requested_account_id === account.id));
+    const priority = task.requested_account_id ? undefined : preferredNewAccountIds(available, true, minimumCredits, new Map([...usage].map(([id, item]) => [id, item.reservedCredits])));
+    const eligible = available.filter(account => (!priority || priority.has(account.id)) && !account.status.error && Date.now() - Date.parse(account.status.checkedAt || "") < 10_000 && (spendableJimengCredits(account.id, account.status.totalCredit, usage.get(account.id)?.reservedCredits || 0) ?? 0) >= Math.max(MIN_PAID_CREDIT, minimumCredits ? minimumCredits.get(account.id) ?? Infinity : 0) && (usage.get(account.id)?.active || 0) < perAccount);
     if (!eligible.length) return;
-    const selected = task.requested_account_id ? selectAccountById(task.requested_account_id, task.model, true) : selectAccount("round_robin", task.model, true, perAccount, minimumCredits);
+    const selected = task.requested_account_id ? selectAccountById(task.requested_account_id, task.model, true) : selectAccount("round_robin", task.model, true, perAccount, minimumCredits, new Set(eligible.map(account => account.id)));
     const changed = db.prepare("UPDATE canvas_tasks SET status='preparing', provider_status='preparing', account_id=?, credential=?, credit_before=?, provider_hold=1, deadline=? WHERE id=? AND status='queued'").run(selected.account.id, encrypt(selected.sessionId), selected.account.status.totalCredit, Date.now() + 30 * 60_000, taskId);
     if (!changed.changes) return;
     grantAccountLease(task.owner, selected.account.id);

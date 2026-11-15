@@ -1,9 +1,10 @@
 import crypto from "node:crypto";
 import { jimengCreditFloor, spendableJimengCredits } from "@/lib/credit-floor.ts";
+import { assertNewAccountAllowed, newAccountAllowed } from "@/lib/account-priority.ts";
 import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import { database, validateApiKey } from "@/lib/database.ts";
-import accountPool, { accountTier, accountSupportsModel, isVideoSubmissionAccount, encrypt, decrypt, markFailure, markSuccess, readAccountSessionById, reserveVideoAccount, videoAccountUsage, videoSubmissionReconciled, videoReservedCredits, VIDEO_ACCOUNT_SUBMISSION_CONCURRENCY } from "@/lib/account-pool.ts";
+import accountPool, { accountTier, accountSupportsModel, requiresPaidCredit, isVideoSubmissionAccount, encrypt, decrypt, markFailure, markSuccess, readAccountSessionById, reserveVideoAccount, videoAccountUsage, videoSubmissionReconciled, videoReservedCredits, VIDEO_ACCOUNT_SUBMISSION_CONCURRENCY } from "@/lib/account-pool.ts";
 import { accountFailureCooldown, refreshVideoAccountBalances, resolveAuthorization } from "./auth.ts";
 import { generateImages } from "./images.ts";
 import { request, videoSubmissionReceipt, withVideoRequestSignal, drainVideoRequests } from "./core.ts";
@@ -127,6 +128,7 @@ async function enqueueVideo(owner: number, authorization: string, input: ReturnT
   if (source && requestedAccountId && requestedAccountId !== source.task.account_id) throw Error("原样片账号绑定不匹配，未提交高清生成");
   if (source) requestedAccountId = source.task.account_id;
   if (requestedAccountId) {
+    assertNewAccountAllowed(requestedAccountId);
     const account = accountPool.get(requestedAccountId);
     if (!isVideoSubmissionAccount(account.name)) throw Error("指定账号已暂停新视频提交，仅可使用超级账号；本次未提交生成");
     if (!source && !accountPool.hasLease(owner, requestedAccountId)) throw Error("该 API Key 没有此视频账号的有效租约绑定");
@@ -178,6 +180,7 @@ async function dispatchVideo(task: Task, token: string, signal: AbortSignal) {
       signal.throwIfAborted();
       const current = get(task.id);
       if (!current || !["preparing", "submitting"].includes(current.status) || Date.now() >= current.deadline) throw Error("任务已取消或超时");
+      assertNewAccountAllowed(task.account_id);
       if (!isVideoSubmissionAccount(accountPool.get(task.account_id).name)) throw Error("当前账号已暂停新视频提交，仅可使用超级账号；本次未提交生成");
     };
     const hooks: SeedanceSubmitHooks = { beforeSubmit, onQuoted: async quote => {
@@ -263,7 +266,11 @@ export function runVideoQueueTick(): Promise<void> {
         continue;
       }
       if (input.kind !== "video") continue;
-      const accounts = accountPool.list().filter(account => account.enabled && accountSupportsModel(account.name, task.model, true) && (!account.cooldownUntil || Date.parse(account.cooldownUntil) <= Date.now()) && (!task.requested_account_id || account.id === task.requested_account_id));
+      if (task.requested_account_id && !newAccountAllowed(task.requested_account_id)) {
+        if (database.prepare("UPDATE canvas_tasks SET status='failed',provider_status='failed',error='当前账号已停止接收新任务，未提交生成；原任务账号保持' WHERE id=? AND status='queued'").run(task.id).changes) await clearPayload(task);
+        continue;
+      }
+      const accounts = accountPool.list().filter(account => newAccountAllowed(account.id) && account.enabled && accountSupportsModel(account.name, task.model, true) && (!account.cooldownUntil || Date.parse(account.cooldownUntil) <= Date.now()) && (!task.requested_account_id || account.id === task.requested_account_id));
       if (accounts.length && accounts.every(account => !account.status.error && Date.now() - Date.parse(account.status.checkedAt || "") < 10_000 && Number.isFinite(account.status.totalCredit) && (spendableJimengCredits(account.id, account.status.totalCredit) ?? 0) < 5)) {
         if (database.prepare("UPDATE canvas_tasks SET status='failed', provider_status='failed', error=? WHERE id=? AND status='queued'").run("即梦候选账号已确认低于最低 5 积分，未提交生成；原任务与预留保持", task.id).changes) await clearPayload(task);
         continue;
@@ -326,7 +333,7 @@ export async function createTask(owner: number, authorization: string, body: unk
   const onSubmitted = (historyId: string) => {
     database.prepare("UPDATE canvas_tasks SET history_id = ?, status = 'running', error = '' WHERE id = ? AND status IN ('submitting', 'uncertain') AND history_id=''").run(historyId, input.id);
   };
-  const beforeSubmit = () => { const current = get(input.id); if (current?.status !== "submitting" || Date.now() >= current.deadline) throw Error("任务已取消或超时"); };
+  const beforeSubmit = () => { const current = get(input.id); if (current?.status !== "submitting" || Date.now() >= current.deadline) throw Error("任务已取消或超时"); if (credential.accountId) assertNewAccountAllowed(credential.accountId, requiresPaidCredit(input.model, false)); };
   const onPaymentPrepared = (payment: { mode: "free" | "credits"; submitId: string }) => {
     const snapshot = { ...payment, policy: "image-payment-v1", taskId: input.id, accountId: credential.accountId, model: input.model, resolution: input.resolution };
     if (!database.prepare("UPDATE canvas_tasks SET quote_json=? WHERE id=? AND status='submitting' AND history_id='' AND quote_json IS NULL").run(JSON.stringify(snapshot), input.id).changes) throw Error("当前账号图片任务已取消或提交状态已变化，未提交生成");

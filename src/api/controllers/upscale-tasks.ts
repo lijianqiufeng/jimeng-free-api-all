@@ -1,3 +1,4 @@
+import { assertNewAccountAllowed } from "@/lib/account-priority.ts";
 import crypto from "node:crypto";
 import { database, saveMedia } from "@/lib/database.ts";
 import { encrypt, decrypt, markFailure, markSuccess, readAccountSessionById } from "@/lib/account-pool.ts";
@@ -468,6 +469,7 @@ async function orchestrate(input: { id: string; image: string; resolution: Agent
   const workspaceId = previousWorkspace?.workspace_id || await ensureAgentWorkspace(accountId, token);
   database.prepare("UPDATE agent_upscale_tasks SET workspace_id = ? WHERE id = ? AND status = 'submitting'").run(workspaceId, id);
   if (stillSubmitting()?.status !== "submitting") return;
+  if (accountId) assertNewAccountAllowed(accountId);
   inflightPaid.add(id);
   const conversationId = util.uuid();
   database.prepare("UPDATE agent_upscale_tasks SET conversation_id = ?, paid_started_at = ? WHERE id = ? AND status = 'submitting'").run(conversationId, Date.now(), id);

@@ -6,6 +6,7 @@ import { generateVideoWithRetry, DEFAULT_MODEL } from '@/api/controllers/videos.
 import { markCredentialFailure, markCredentialSuccess, resolveAuthorization } from '@/api/controllers/auth.ts';
 import util from '@/lib/util.ts';
 import db from '@/lib/database.ts';
+import { accountPriorityReceipt } from '@/lib/account-priority.ts';
 import { SEEDANCE_MODELS } from '@/api/controllers/seedance-contract.ts';
 import { quoteVideo } from '@/api/controllers/video-quote.ts';
 import { tokenSplit } from '@/api/controllers/core.ts';
@@ -28,7 +29,7 @@ export default {
         '/policy': async (request: Request) => {
             request.validate('headers.authorization', _.isString);
             if (!tokenSplit(request.headers.authorization).some(token => db.validateApiKey(token).valid)) return new Response({ error: 'API Key 无效' }, { statusCode: 401 });
-            return { accountPolicy: 'super-only', videoQueuePolicy: 'serial-submit-on-accepted-v2', longVideoPolicy: 'official-long-video-v1' };
+            return { accountPolicy: 'super-only', videoQueuePolicy: 'serial-submit-on-accepted-v2', longVideoPolicy: 'official-long-video-v1', accountPriority: accountPriorityReceipt };
         },
         '/quote': async (request: Request) => {
             request.validate('headers.authorization', _.isString);

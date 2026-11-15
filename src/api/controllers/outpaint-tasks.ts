@@ -1,3 +1,4 @@
+import { assertNewAccountAllowed } from "@/lib/account-priority.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, link, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -114,7 +115,7 @@ async function dispatch(original: OutpaintTask, controller: AbortController) {
       database.prepare("UPDATE native_outpaint_tasks SET image_uri=?,workspace_id=? WHERE id=? AND status='preparing'").run(uploaded.uri, workspaceId, task.id);
       const payload = buildOutpaintRequest(input, uploaded.uri, workspaceId, task.submit_id, task.created_at);
       const response = await request("post", "/mweb/v1/aigc_draft/generate", token, { timeout: 120_000, signal: controller.signal, params: outpaintRequestParams(task.submit_id), data: payload,
-        beforeSubmit: () => { active(); }, onSubmitting: () => { if (!database.prepare("UPDATE native_outpaint_tasks SET status='submitting',paid_started_at=? WHERE id=? AND status='preparing' AND paid_started_at=0").run(Date.now(), task.id).changes) throw Error("扩图提交身份已变化，未重复提交"); } });
+        beforeSubmit: () => { active(); assertNewAccountAllowed(task.account_id); }, onSubmitting: () => { assertNewAccountAllowed(task.account_id); if (!database.prepare("UPDATE native_outpaint_tasks SET status='submitting',paid_started_at=? WHERE id=? AND status='preparing' AND paid_started_at=0").run(Date.now(), task.id).changes) throw Error("扩图提交身份已变化，未重复提交"); } });
       const historyId = response?.aigc_data?.history_record_id;
       if (historyId && historyId !== "0" && /^[A-Za-z0-9:_-]{1,160}$/.test(String(historyId))) {
         database.prepare("UPDATE native_outpaint_tasks SET history_id=?,status=CASE WHEN status='canceled' THEN status ELSE 'running' END,error='',error_code='' WHERE id=? AND history_id='' AND paid_started_at>0").run(String(historyId), task.id);
