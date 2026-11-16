@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { jimengCreditFloor, spendableJimengCredits } from "@/lib/credit-floor.ts";
-import { assertNewAccountAllowed, newAccountAllowed } from "@/lib/account-priority.ts";
+import { accountPriority, assertNewAccountAllowed, newAccountAllowed } from "@/lib/account-priority.ts";
 import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import { database, validateApiKey } from "@/lib/database.ts";
@@ -129,6 +129,7 @@ async function enqueueVideo(owner: number, authorization: string, input: ReturnT
   if (source) requestedAccountId = source.task.account_id;
   if (requestedAccountId) {
     assertNewAccountAllowed(requestedAccountId);
+    if (accountPriority && !source) throw Error("新视频按账号优先级自动分配，不能指定账号；原任务和样片绑定保持");
     const account = accountPool.get(requestedAccountId);
     if (!isVideoSubmissionAccount(account.name)) throw Error("指定账号已暂停新视频提交，仅可使用超级账号；本次未提交生成");
     if (!source && !accountPool.hasLease(owner, requestedAccountId)) throw Error("该 API Key 没有此视频账号的有效租约绑定");

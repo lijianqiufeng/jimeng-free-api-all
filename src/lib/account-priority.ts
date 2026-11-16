@@ -13,8 +13,9 @@ database.transaction(() => {
 }).immediate();
 
 export const newAccountAllowed = (id: string, paid = true) => !paid && id !== accountPriority?.primaryAccountId || jimengNewAccountAllowed(accountPriority, id);
+export class AccountPriorityError extends Error {}
 export function assertNewAccountAllowed(id: string, paid = true) {
-    if (!newAccountAllowed(id, paid)) throw Error("当前账号已停止接收新任务，未提交生成；原任务账号保持");
+    if (!newAccountAllowed(id, paid)) throw new AccountPriorityError("当前账号已停止接收新任务，未提交生成；原任务账号保持");
 }
 
 type Candidate = { id: string; status: { totalCredit: number | null; error?: string; checkedAt: string | null } };

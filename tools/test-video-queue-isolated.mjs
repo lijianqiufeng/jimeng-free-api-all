@@ -7,7 +7,7 @@ import { build } from "esbuild";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const allowed = [
-  "account-priority", "account-priority-startup", "account-priority-dispatch", "credit-floor", "credit-floor-dispatch",
+  "account-priority", "account-priority-legacy", "account-priority-startup", "account-priority-dispatch", "credit-floor", "credit-floor-dispatch",
   "account-selection", "agent-upscale-client", "agent-upscale-protocol", "agent-upscale-routes", "agent-upscale-tasks",
   "canvas-tasks", "premium-images", "seedance-browser", "seedance-draft", "seedance-draft-upgrade", "seedance-tasks",
   "seedance-upload", "task-errors", "upscale-console", "upscale-ui", "video-billing", "video-queue",

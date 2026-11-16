@@ -7,6 +7,8 @@ import { DEFAULT_MODEL, generateImagesWithRetry } from "@/api/controllers/images
 import { markCredentialFailure, markCredentialSuccess, resolveAuthorization } from "@/api/controllers/auth.ts";
 import util from "@/lib/util.ts";
 import db from "@/lib/database.ts";
+import { AccountPriorityError, assertNewAccountAllowed } from "@/lib/account-priority.ts";
+import { requiresPaidCredit } from "@/lib/account-pool.ts";
 
 const MAX_REFERENCE_IMAGES = 10;
 
@@ -95,10 +97,11 @@ export default {
           negativePrompt,
           filePaths,
           n,
+          beforeSubmit: () => { if (credential.accountId) assertNewAccountAllowed(credential.accountId, requiresPaidCredit(model, false)); },
         }, token);
         markCredentialSuccess(credential);
       } catch (error) {
-        markCredentialFailure(credential);
+        if (!(error instanceof AccountPriorityError)) markCredentialFailure(credential);
         throw error;
       }
       

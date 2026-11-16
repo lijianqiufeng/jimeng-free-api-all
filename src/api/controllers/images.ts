@@ -675,6 +675,7 @@ export async function generateImagesWithRetry(
     filePath?: string;
     filePaths?: string[];
     n?: number;
+    beforeSubmit?: () => void;
   },
   refreshToken: string
 ): Promise<string[]> {

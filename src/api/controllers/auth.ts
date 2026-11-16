@@ -51,6 +51,7 @@ export function refreshVideoAccountBalances(model: string) {
 export function publicAccountError(error: unknown): string | undefined {
   const message = error instanceof Error ? error.message : "";
   return [
+    "新视频按账号优先级自动分配，不能指定账号；原任务和样片绑定保持",
     "当前账号已停止接收新任务，未提交生成；原任务账号保持",
     "账号优先级已启用，新任务必须使用托管 API Key，未提交生成",
     "当前账号有保留积分，此入口缺少可冻结报价，未提交生成；请使用视频创作台或其他账号",

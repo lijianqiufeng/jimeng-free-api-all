@@ -5,6 +5,8 @@ import Response from '@/lib/response/Response.ts';
 import { createCompletion, createCompletionStream } from '@/api/controllers/chat.ts';
 import { DEFAULT_MODEL } from '@/api/controllers/images.ts';
 import { markCredentialFailure, markCredentialSuccess, resolveAuthorization } from '@/api/controllers/auth.ts';
+import { AccountPriorityError, assertNewAccountAllowed } from '@/lib/account-priority.ts';
+import { requiresPaidCredit } from '@/lib/account-pool.ts';
 
 export default {
 
@@ -24,19 +26,20 @@ export default {
             const credential = await resolveAuthorization(request.headers.authorization, undefined, request.body.model || DEFAULT_MODEL, video, video);
             const token = credential.token;
             const { model, messages, stream } = request.body;
+            const beforeSubmit = () => { if (credential.accountId) assertNewAccountAllowed(credential.accountId, requiresPaidCredit(model || DEFAULT_MODEL, false)); };
             try {
                 if (stream) {
-                    const stream = await createCompletionStream(messages, token, model);
+                    const stream = await createCompletionStream(messages, token, model, 0, beforeSubmit);
                     markCredentialSuccess(credential);
                     return new Response(stream, {
                         type: "text/event-stream"
                     });
                 }
-                const result = await createCompletion(messages, token, model);
+                const result = await createCompletion(messages, token, model, 0, beforeSubmit);
                 markCredentialSuccess(credential);
                 return result;
             } catch (error) {
-                markCredentialFailure(credential);
+                if (!(error instanceof AccountPriorityError)) markCredentialFailure(credential);
                 throw error;
             }
         }

@@ -9,6 +9,7 @@ import db from "@/lib/database.ts";
 import { generateImagesWithRetry, DEFAULT_MODEL } from "./images.ts";
 import { generateVideo, DEFAULT_MODEL as DEFAULT_VIDEO_MODEL } from "./videos.ts";
 import { getCredit } from "./core.ts";
+import { AccountPriorityError } from "@/lib/account-priority.ts";
 
 // 最大重试次数
 const MAX_RETRY_COUNT = 3;
@@ -141,7 +142,8 @@ export async function createCompletion(
   messages: any[],
   refreshToken: string,
   _model = DEFAULT_MODEL,
-  retryCount = 0
+  retryCount = 0,
+  beforeSubmit?: () => void,
 ) {
   return (async () => {
     if (messages.length === 0)
@@ -259,6 +261,7 @@ export async function createCompletion(
           ratio: "1:1",  // 默认比例
           resolution: "2k",  // 初始尝试 2K，会自动降级
           filePath: imageUrls.length > 0 ? imageUrls[0] : "", // 第一张图片作为参考图
+          beforeSubmit,
         },
         refreshToken
       );
@@ -303,12 +306,13 @@ export async function createCompletion(
       };
     }
   })().catch((err) => {
+    if (err instanceof AccountPriorityError) throw err;
     if (retryCount < MAX_RETRY_COUNT) {
       logger.error(`Response error: ${err.stack}`);
       logger.warn(`Try again after ${RETRY_DELAY / 1000}s...`);
       return (async () => {
         await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY));
-        return createCompletion(messages, refreshToken, _model, retryCount + 1);
+        return createCompletion(messages, refreshToken, _model, retryCount + 1, beforeSubmit);
       })();
     }
     throw err;
@@ -327,7 +331,8 @@ export async function createCompletionStream(
   messages: any[],
   refreshToken: string,
   _model = DEFAULT_MODEL,
-  retryCount = 0
+  retryCount = 0,
+  beforeSubmit?: () => void,
 ) {
   return (async () => {
     const { model, width, height } = parseModel(_model);
@@ -571,7 +576,7 @@ export async function createCompletionStream(
       generateImagesWithRetry(
         model,
         promptText || lastMessage.content,
-        { ratio: "1:1", resolution: "2k", filePath: imageUrls.length > 0 ? imageUrls[0] : "" },
+        { ratio: "1:1", resolution: "2k", filePath: imageUrls.length > 0 ? imageUrls[0] : "", beforeSubmit },
         refreshToken
       )
         .then((generatedUrls) => {
@@ -651,6 +656,7 @@ export async function createCompletionStream(
     }
     return stream;
   })().catch((err) => {
+    if (err instanceof AccountPriorityError) throw err;
     if (retryCount < MAX_RETRY_COUNT) {
       logger.error(`Response error: ${err.stack}`);
       logger.warn(`Try again after ${RETRY_DELAY / 1000}s...`);
@@ -660,7 +666,8 @@ export async function createCompletionStream(
           messages,
           refreshToken,
           _model,
-          retryCount + 1
+          retryCount + 1,
+          beforeSubmit,
         );
       })();
     }
