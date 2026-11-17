@@ -46,6 +46,7 @@ const IMAGE_REQ_KEY_IDS: Record<string, string> = {
 
 const VIDEO_REQ_KEY_IDS: Record<string, string> = {
   dreamina_seedance_45_pro: "jimeng-video-seedance-2.5",
+  dreamina_seedance_45_flash: "jimeng-video-seedance-2.5-flash",
   dreamina_seedance_45_pro_draft: "jimeng-video-seedance-2.5-draft",
   dreamina_seedance_40_mini: "jimeng-video-seedance-2.0-mini",
   dreamina_seedance_40: "jimeng-video-seedance-2.0-fast",
@@ -174,6 +175,19 @@ const STATIC_IMAGE_MODELS: JimengModelConfig[] = [
 ];
 
 const STATIC_VIDEO_MODELS: JimengModelConfig[] = [
+  {
+    id: "jimeng-video-seedance-2.5-flash",
+    type: "video",
+    name: "Seedance 2.5 Flash",
+    description: "即梦 Seedance 2.5 Flash，按当前账号官方报价提交",
+    modelReqKey: "dreamina_seedance_45_flash",
+    defaultResolution: "720p",
+    supportedResolutions: ["480p", "720p"],
+    supportedDurations: Array.from({ length: 27 }, (_, index) => index + 4),
+    defaultDuration: 4,
+    supportsLongDuration: true,
+    source: "static",
+  },
   {
     id: "jimeng-video-seedance-2.5-draft",
     type: "video",

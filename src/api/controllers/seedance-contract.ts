@@ -1,6 +1,7 @@
 export const SEEDANCE_MODELS = {
   "jimeng-video-seedance-2.0": { resolutions: ["720p"], maxDuration: 15, images: 9, videos: 3, audios: 3, total: 12 },
   "jimeng-video-seedance-2.5": { resolutions: ["480p", "720p", "1080p"], maxDuration: 30, images: 30, videos: 10, audios: 10, total: 50 },
+  "jimeng-video-seedance-2.5-flash": { resolutions: ["480p", "720p"], maxDuration: 30, images: 10, videos: 5, audios: 5, total: 20 },
   "jimeng-video-seedance-2.5-long": { resolutions: ["720p"], maxDuration: 180, images: 30, videos: 10, audios: 10, total: 50 },
   "jimeng-video-seedance-2.5-draft": { resolutions: ["480p"], maxDuration: 30, images: 30, videos: 10, audios: 10, total: 50 },
   "jimeng-video-seedance-2.0-mini": { resolutions: ["720p"], maxDuration: 15, images: 9, videos: 3, audios: 3, total: 12 },
@@ -16,10 +17,11 @@ export function seedanceVideoPrice(model: string, resolution: string, hasVideo: 
   if (isLongVideo(model)) return hasVideo ? prices?.long_video_price : prices?.no_input_video_long_video_price;
   return model === "jimeng-video-seedance-2.0"
     ? hasVideo ? raw?.commercial_config?.format_conf?.unified_edit_input_video : raw?.commercial_config?.default
-    : ["jimeng-video-seedance-2.5", "jimeng-video-seedance-2.5-draft"].includes(model) && !hasVideo ? prices?.no_input_video_price : prices?.price;
+    : ["jimeng-video-seedance-2.5", "jimeng-video-seedance-2.5-draft", "jimeng-video-seedance-2.5-flash"].includes(model) && !hasVideo ? prices?.no_input_video_price : prices?.price;
 }
 export function seedanceVideoBenefit(model: string, resolution: string, hasVideo: boolean, raw: any): string | undefined {
   const price = seedanceVideoPrice(model, resolution, hasVideo, raw);
+  if (model === "jimeng-video-seedance-2.5-flash" && (raw?.model_req_key !== "dreamina_seedance_45_flash" || !["480p", "720p"].includes(resolution) || price?.resource_id !== "generate_video" || price?.resource_id_type !== "str" || price?.resource_sub_type !== "aigc" || price?.benefit_type !== `seedance_25_flash_${resolution}_${hasVideo ? "output" : "no_input_video"}`)) return;
   if (isLongVideo(model) && (resolution !== "720p" || price?.resource_id !== "generate_video" || price?.resource_id_type !== "str" || price?.resource_sub_type !== "aigc" || price?.benefit_type !== (hasVideo ? "seedance_25_long_video_720p_output" : "seedance_25_long_video_720p_no_input_video_output"))) return;
   return typeof price?.benefit_type === "string" && price.benefit_type ? price.benefit_type : undefined;
 }

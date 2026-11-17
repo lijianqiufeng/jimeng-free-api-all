@@ -19,7 +19,7 @@ export async function submitSeedanceVideo(input: ReturnType<typeof seedanceInput
   if (config.source !== "dynamic" || config.raw?.model_status !== 0) throw Error("当前账号未确认可用视频模型，未提交生成");
   if (isDraft && (config.modelReqKey !== "dreamina_seedance_45_pro_draft" || config.raw?.extra?.is_draft_mode !== true)) throw Error("当前账号未确认可用样片模式，未提交生成");
   if (!config.supportedResolutions.includes(input.resolution) || !config.supportedDurations?.includes(input.duration)) throw Error("当前账号不支持所选视频参数，未提交生成");
-  const is25 = isLong || isDraft || input.model === "jimeng-video-seedance-2.5", materials: Record<string, unknown>[] = [];
+  const is25 = isLong || isDraft || input.model === "jimeng-video-seedance-2.5" || input.model === "jimeng-video-seedance-2.5-flash", materials: Record<string, unknown>[] = [];
   const checkLongReferences = () => {
     if (!isLong) return;
     const option = config?.raw?.options?.find((item: any) => item.key === "unified_edit"), limits = option?.unified_edit_config;
