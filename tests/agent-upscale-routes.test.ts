@@ -212,9 +212,12 @@ test("polling GET and DELETE never send another paid conversation", async () => 
   assert.equal(readRow(id).conversation_id, conversationId);
 });
 
-test("upscale tasks route is registered last", () => {
+test("upscale tasks route is registered once after base task routes", () => {
   assert.equal(routes.prefix, "/v1/upscale/tasks");
-  assert.equal(registered[registered.length - 1].prefix, "/v1/upscale/tasks");
-  assert.equal(registered[registered.length - 2].prefix, "/v1/tasks");
+  const prefixes = registered.map((item) => item.prefix);
+  assert.equal(prefixes.filter((prefix) => prefix === routes.prefix).length, 1);
+  assert.ok(prefixes.indexOf(routes.prefix) > prefixes.indexOf("/v1/tasks"));
+  assert.ok(prefixes.indexOf("/v1/outpaint/tasks") > prefixes.indexOf(routes.prefix));
+  assert.deepEqual(prefixes.slice(-3), ["/v1/tasks", "/v1/upscale/tasks", "/v1/outpaint/tasks"]);
 });
 });

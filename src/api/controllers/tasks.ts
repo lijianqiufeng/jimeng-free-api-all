@@ -1,3 +1,4 @@
+import { officialAssetReader } from "./official-image-export.ts";
 import crypto from "node:crypto";
 import { jimengCreditFloor, spendableJimengCredits } from "@/lib/credit-floor.ts";
 import { accountPriority, assertNewAccountAllowed, newAccountAllowed } from "@/lib/account-priority.ts";
@@ -362,10 +363,7 @@ export async function queryOfficialVideoExport(owner: number, id: string) {
   }
   const unavailable = { status: 200, body: { id, accountId: task.account_id, available: false } };
   const token = readAccountSessionById(task.account_id);
-  const signal = AbortSignal.timeout(9_000);
-  const params = { web_version: "7.5.0", da_version: "3.3.40", aigc_features: "app_lip_sync" };
-  const headers = { Cookie: ["sessionid", "sessionid_ss", "sid_tt"].map(name => `${name}=${token}`).join("; ") };
-  const officialRead = (uri: string, data: object) => request("post", uri, token, { data, params, headers, signal });
+  const officialRead = officialAssetReader(token);
   const settings = await officialRead("/mweb/v1/get_settings", {});
   if (settings.user_custom_settings?.close_watermark !== true) return unavailable;
 

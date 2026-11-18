@@ -1,3 +1,4 @@
+import { officialAssetReader, officialUpscaleImage } from "./official-image-export.ts";
 import { assertNewAccountAllowed } from "@/lib/account-priority.ts";
 import crypto from "node:crypto";
 import { database, saveMedia } from "@/lib/database.ts";
@@ -508,6 +509,21 @@ export async function createUpscaleTask(owner: number, authorization: string, bo
   return { status: 202, body: publicTask(get(input.id)!) };
 }
 
+async function originalAccountDownload(task: UpscaleTask, body: Record<string, unknown>, requestedAccountId?: string) {
+  if (task.status !== "succeeded" || !task.account_id || requestedAccountId !== task.account_id || !task.history_id || !task.provider_task_id
+    || !Array.isArray(body.data) || !body.data.length) return { status: 200, body };
+  let url: string | undefined;
+  try {
+    const token = readAccountSessionById(task.account_id);
+    url = await officialUpscaleImage(officialAssetReader(token), task.history_id, task.provider_task_id);
+  } catch { /* An unavailable official export does not discard the completed original result. */ }
+  const current = get(task.id);
+  if (!current || current.owner !== task.owner || current.account_id !== task.account_id || current.history_id !== task.history_id
+    || current.provider_task_id !== task.provider_task_id || current.status !== task.status || current.conversation_id !== task.conversation_id || current.workspace_id !== task.workspace_id)
+    return { status: 409, body: { error: "原高清任务已变化，未重新生成" } };
+  return { status: 200, body: url ? { ...body, data: [{ ...body.data[0], url }, ...body.data.slice(1)], officialExport: true } : body };
+}
+
 export async function queryUpscaleTask(owner: number, id: string, refreshResult = false, requestedAccountId?: string) {
   let task = get(id);
   if (!task || task.owner !== owner) return { status: 404, body: { error: NOT_FOUND } };
@@ -521,7 +537,7 @@ export async function queryUpscaleTask(owner: number, id: string, refreshResult 
       if (result.status !== "succeeded" || observation.historyId !== task.history_id || observation.submitId !== task.provider_task_id) return { status: 503, body: { error: "原高清结果暂时无法读取，未重新生成" } };
       const current = get(id);
       if (!current || current.status !== task.status || current.account_id !== task.account_id || current.history_id !== task.history_id || current.provider_task_id !== task.provider_task_id || current.workspace_id !== task.workspace_id || current.conversation_id !== task.conversation_id) return { status: 409, body: { error: "原高清任务已变化，未重新生成" } };
-      return { status: 200, body: { ...publicTask(current), status: "succeeded", error: undefined, data: result.urls.map((url) => ({ url })) } };
+      return originalAccountDownload(current, { ...publicTask(current), status: "succeeded", error: undefined, data: result.urls.map((url) => ({ url })) }, requestedAccountId);
     } catch {
       return { status: 503, body: { error: "原高清结果暂时无法读取，未重新生成" } };
     }
@@ -531,7 +547,8 @@ export async function queryUpscaleTask(owner: number, id: string, refreshResult 
     database.prepare("UPDATE agent_upscale_tasks SET checked_at = ? WHERE id = ?").run(Date.now(), id);
     ensureMonitor(id);
   }
-  return { status: 200, body: publicTask(get(id)!) };
+  const current = get(id)!;
+  return originalAccountDownload(current, publicTask(current), requestedAccountId);
 }
 
 export function cancelUpscaleTask(owner: number, id: string) {
