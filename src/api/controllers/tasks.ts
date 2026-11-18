@@ -354,6 +354,40 @@ export async function createTask(owner: number, authorization: string, body: unk
   return { status: 202, body: publicTask(get(input.id)!) };
 }
 
+export async function queryOfficialVideoExport(owner: number, id: string) {
+  const task = get(id);
+  if (!task || task.owner !== owner || task.kind !== "video") return { status: 404, body: { error: "视频任务不存在" } };
+  if (task.status !== "succeeded" || !task.result || !task.account_id || !task.history_id) {
+    return { status: 409, body: { error: "原视频尚未完成" } };
+  }
+  const unavailable = { status: 200, body: { id, accountId: task.account_id, available: false } };
+  const token = readAccountSessionById(task.account_id);
+  const signal = AbortSignal.timeout(9_000);
+  const params = { web_version: "7.5.0", da_version: "3.3.40", aigc_features: "app_lip_sync" };
+  const headers = { Cookie: ["sessionid", "sessionid_ss", "sid_tt"].map(name => `${name}=${token}`).join("; ") };
+  const officialRead = (uri: string, data: object) => request("post", uri, token, { data, params, headers, signal });
+  const settings = await officialRead("/mweb/v1/get_settings", {});
+  if (settings.user_custom_settings?.close_watermark !== true) return unavailable;
+
+  const history = taskHistory(await officialRead("/mweb/v1/get_history_by_ids", { history_ids: [task.history_id] }), task.history_id);
+  const items = history?.item_list, itemId = items?.[0]?.common_attr?.id;
+  if (items?.length !== 1 || !items[0]?.video || ![21, 50].includes(Number(history.status ?? history.task?.status))
+    || (history.history_record_id && String(history.history_record_id) !== task.history_id)
+    || !/^[A-Za-z0-9_-]{1,128}$/.test(String(itemId || ""))) return unavailable;
+  const result = await officialRead("/mweb/v1/get_local_item_list", {
+    item_id_list: [itemId], pack_item_opt: { scene: 1, need_data_integrity: true }, is_for_video_download: true,
+  });
+  const item = result.item_list?.[0], address = item?.video?.transcoded_video?.origin?.video_url;
+  if (result.item_list?.length !== 1 || String(item?.common_attr?.id) !== String(itemId) || typeof address !== "string") return unavailable;
+  const url = new URL(address);
+  if (url.protocol !== "https:" || url.username || url.password || url.port
+    || !/^v\d+-(?:dreamnia\.jimeng\.com|artist\.vlabvod\.com)$/.test(url.hostname)) return unavailable;
+  const current = get(id);
+  if (current?.status !== "succeeded" || current.owner !== owner || current.account_id !== task.account_id
+    || current.history_id !== task.history_id) return unavailable;
+  return { status: 200, body: { id, accountId: task.account_id, available: true, url: url.href } };
+}
+
 export async function queryTask(owner: number, id: string) {
   let task = get(id);
   if (!task || task.owner !== owner) return { status: 404, body: { error: "任务不存在" } };

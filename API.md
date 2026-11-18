@@ -10,6 +10,14 @@
 
 使用管理端 `jm_` API Key 调用 `POST /v1/tasks`、`GET /v1/tasks/:id`、`DELETE /v1/tasks/:id`。任务 ID 须在首次 POST 前保存；相同 ID 与参数返回原任务，不重复生成，不同归属或参数冲突返回 409。账号池凭据和上游历史 ID 由服务端保存，不返回客户端。
 
+### 已完成视频的官方导出
+
+`GET /v1/tasks/:id/official-export` 使用该任务原有的 `jm_` API Key。CPA 沿任务绑定的即梦账号和作品编号查询，并使用该账号已经保存的官方导出去标识设置。
+
+返回 `available: true` 时，`id` 和 `accountId` 用于核对原任务，`url` 是即梦返回的导出地址。返回 `available: false` 时，调用方可继续使用原任务结果地址。任务尚未完成时返回 409，导出暂时受阻时返回 503。
+
+画布回存官方导出件时另外保存原片。该接口只查询已有成果，原任务状态及原成果地址按原流程保留。
+
 | model | resolution | duration | 图片 / 视频 / 音频 / 合计 |
 | --- | --- | --- | --- |
 | `jimeng-video-seedance-2.5` | 480p / 720p / 1080p | 4–30 秒 | 30 / 10 / 10 / 50 |

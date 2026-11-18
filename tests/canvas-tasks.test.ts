@@ -5,7 +5,7 @@ import axios from "axios";
 import { database, createApiKey, validateApiKey } from "@/lib/database.ts";
 import accountPool from "@/lib/account-pool.ts";
 import { taskInput, taskResult } from "@/api/controllers/task-contract.ts";
-import { createTask, queryTask, cancelTask } from "@/api/controllers/tasks.ts";
+import { createTask, queryTask, cancelTask, queryOfficialVideoExport } from "@/api/controllers/tasks.ts";
 import { request } from "@/api/controllers/core.ts";
 import { generateImages } from "@/api/controllers/images.ts";
 import { markCredentialFailure, resolveAuthorization } from "@/api/controllers/auth.ts";
@@ -55,6 +55,41 @@ const otherAuthorization = `Bearer ${otherManaged.key}`;
 const boundAccount = accountPool.create({ name: "bound account", sessionId: "bound-account-session" });
 const input = { id: "canvas_test_1234567890", model: "jimeng-image-5.0-lite", prompt: "test 16:9 but request 1:1", ratio: "1:1", resolution: "2k", images: [] };
 async function until(predicate: () => boolean) { const end = Date.now() + 2000; while (!predicate() && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 5)); assert.ok(predicate()); }
+
+test("official export reads only the completed task's original account and item", async () => {
+  const id = "completed-export-fixture", original = JSON.stringify([{ url: "https://v26-artist.vlabvod.com/source.mp4" }]);
+  const url = "https://v3-dreamnia.jimeng.com/export.mp4";
+  database.prepare(`INSERT INTO canvas_tasks(id,owner,kind,model,fingerprint,status,account_id,history_id,result,deadline)
+    VALUES(?,?,'video','jimeng-video-seedance-2.5','fixture','succeeded',?,'history-original',?,?)`).run(id,owner,boundAccount.id,original,Date.now());
+  const adapter = axios.defaults.adapter, paths: string[] = [];
+  let optedIn = false;
+  axios.defaults.adapter = async (config) => {
+    const endpoint = new URL(String(config.url)).pathname, input = JSON.parse(String(config.data));
+    assert.match(String(config.headers.Cookie), /(?:^|; )sessionid=bound-account-session(?:;|$)/);
+    paths.push(endpoint);
+    let data: unknown;
+    if (endpoint === "/mweb/v1/get_settings") data = { user_custom_settings: { close_watermark: optedIn } };
+    else if (endpoint === "/mweb/v1/get_history_by_ids") {
+      assert.deepEqual(input.history_ids, ["history-original"]);
+      data = { "history-original": { status: 50, item_list: [{ common_attr: { id: "item-original" }, video: {} }] } };
+    } else {
+      assert.equal(endpoint, "/mweb/v1/get_local_item_list");
+      assert.deepEqual(input, { item_id_list: ["item-original"], pack_item_opt: { scene: 1, need_data_integrity: true }, is_for_video_download: true });
+      data = { item_list: [{ common_attr: { id: "item-original" }, video: { transcoded_video: { origin: { video_url: url } } } }] };
+    }
+    return { data: { ret: "0", data }, status: 200, statusText: "OK", headers: {}, config };
+  };
+  try {
+    assert.equal((await queryOfficialVideoExport(owner + 1,id)).status,404);
+    assert.deepEqual((await queryOfficialVideoExport(owner,id)).body,{id,accountId:boundAccount.id,available:false});
+    assert.deepEqual(paths,["/mweb/v1/get_settings"]);
+    optedIn = true;
+    assert.deepEqual((await queryOfficialVideoExport(owner,id)).body,{id,accountId:boundAccount.id,available:true,url});
+    assert.deepEqual(paths.slice(1),["/mweb/v1/get_settings","/mweb/v1/get_history_by_ids","/mweb/v1/get_local_item_list"]);
+    assert.deepEqual(database.prepare("SELECT result,account_id,history_id FROM canvas_tasks WHERE id=?").get(id),
+      {result:original,account_id:boundAccount.id,history_id:"history-original"});
+  } finally { axios.defaults.adapter = adapter; }
+});
 
 test("ordered refs and strict parameters reject paths, URLs and unknown models", () => {
   assert.deepEqual(taskInput(input).images, []);
